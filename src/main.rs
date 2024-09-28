@@ -22,11 +22,12 @@ use lazy_static::lazy_static;
 use log::{error, info};
 use ratatui::{
   crossterm::event::{self, KeyCode, KeyEventKind},
-  layout::{Constraint, Layout},
+  layout::{Constraint, Layout, Rect},
   prelude::Backend,
   restore,
   style::Stylize,
-  widgets::{Block, Paragraph},
+  text::Line,
+  widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
   DefaultTerminal, Terminal,
 };
 use std::io::Write as _;
@@ -35,16 +36,12 @@ pub type UserQuitChannel = Channel<bool>;
 pub type BuildOutputChannel = Channel<BuildEntry>;
 
 pub struct App {
-  build_output: Arc<BuildOutputChannel>,
-  user_quit: Arc<UserQuitChannel>,
   threads: VecDeque<JoinHandle<()>>,
 }
 
 impl App {
   pub fn new() -> Self {
     Self {
-      build_output: Arc::new(Channel::new()),
-      user_quit: Arc::new(Channel::new()),
       threads: VecDeque::new(),
     }
   }
@@ -59,13 +56,13 @@ impl App {
   }
 
   pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
-    let user_quit = self.user_quit.clone();
-    let build_output = self.build_output.clone();
+    let (tx_user_quit, rx_user_quit) = channel::<bool>();
+    let (tx_build_output, rx_build_output) = channel::<BuildEntry>();
     self.threads = VecDeque::from([
       // render
-      spawn(move || render(user_quit)),
+      spawn(move || render(tx_user_quit, rx_build_output)),
       // build
-      spawn(move || build(build_output)),
+      spawn(move || build(tx_build_output)),
     ]);
     let mut th_id = 0;
     while let Some(th) = self.threads.pop_front() {
@@ -84,7 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
   App::new().run()
 }
 
-fn build(build_output: Arc<BuildOutputChannel>) {
+fn build(build_output: Sender<BuildEntry>) {
   let args = std::env::args().skip(1).collect::<Vec<_>>();
   Debug::log("build thread started");
   match CargoBuild::spawn(args) {
@@ -126,12 +123,12 @@ fn build(build_output: Arc<BuildOutputChannel>) {
   Debug::log("build thread stopped");
 }
 
-fn render(user_quit: Arc<UserQuitChannel>) {
+fn render(user_quit: Sender<bool>, build_output: Receiver<BuildEntry>) {
   Debug::log("render thread started");
   let mut terminal = ratatui::init();
   let _ = terminal.clear();
   App::set_panic_hook();
-  let app_result = render_loop(terminal, user_quit);
+  let app_result = render_loop(terminal, user_quit, build_output);
   ratatui::restore();
   if let Err(e) = app_result {
     Debug::log(format!("failed to run app, {}", e));
@@ -139,25 +136,81 @@ fn render(user_quit: Arc<UserQuitChannel>) {
   Debug::log("render thread stopped");
 }
 
-fn render_loop(mut terminal: DefaultTerminal, user_quit: Arc<UserQuitChannel>) -> io::Result<()> {
+fn render_loop(
+  mut terminal: DefaultTerminal,
+  user_quit: Sender<bool>,
+  build_output: Receiver<BuildEntry>,
+) -> io::Result<()> {
+  let mut entries = vec![];
+  let mut vertical_scroll_state = ScrollbarState::default();
+  let mut vertical_scroll: usize = 0;
   loop {
+    if let Ok(entry) = build_output.try_recv() {
+      Debug::log("Add one build entry");
+      entries.push(entry);
+    }
+    let lines = entries
+      .iter()
+      .map(|e| Line::from(format!("{}", e.message())))
+      .collect::<Vec<_>>();
+    let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
     terminal.draw(|frame| {
       let mut args = vec!["cargo".to_string(), "build".to_string()];
       args.extend(std::env::args().skip(1).collect::<Vec<_>>());
-      let [command_area, log_area] =
+      [command_area, log_area] =
         Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(frame.area());
-      let command = Paragraph::new(format!("cmd: {}", args.join(" "))).block(Block::bordered());
-      let log = Paragraph::new("Logs").block(Block::bordered());
+      let command =
+        Paragraph::new(Line::default().spans(["cmd".bold(), ":".into(), args.join(" ").into()]))
+          .block(Block::bordered());
+      vertical_scroll_state = vertical_scroll_state.content_length(lines.len());
+      let log = Paragraph::new(lines.clone())
+        .gray()
+        .block(Block::bordered().gray())
+        .scroll((vertical_scroll as u16, 0));
+      // let log = Paragraph::new(lines).block(Block::bordered());
       frame.render_widget(command, command_area);
       frame.render_widget(log, log_area);
+      frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+          .begin_symbol(Some("↑"))
+          .end_symbol(Some("↓")),
+        log_area,
+        &mut vertical_scroll_state,
+      );
     })?;
 
-    if let event::Event::Key(key) = event::read()? {
-      if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-        if let Err(e) = user_quit.send(true) {
-          Debug::log(format!("failed to quit app, {}", e));
+    if event::poll(Duration::from_millis(1))? {
+      if let event::Event::Key(key) = event::read()? {
+        if key.kind == KeyEventKind::Press {
+          if key.code == KeyCode::Char('q') {
+            if let Err(e) = user_quit.send(true) {
+              Debug::log(format!("failed to quit app, {}", e));
+            }
+            break;
+          } else if key.code == KeyCode::Char('j') {
+            if vertical_scroll < lines.len().saturating_sub(log_area.height as usize) {
+              vertical_scroll = vertical_scroll.saturating_add(1);
+              vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+            }
+          } else if key.code == KeyCode::Char('k') {
+            vertical_scroll = vertical_scroll.saturating_sub(1);
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+          } else if key.code == KeyCode::End {
+            vertical_scroll = lines.len();
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+          } else if key.code == KeyCode::Home {
+            vertical_scroll = 0;
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+          } else if key.code == KeyCode::PageUp {
+            vertical_scroll = vertical_scroll.saturating_sub(log_area.height as usize);
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+          } else if key.code == KeyCode::PageDown {
+            if vertical_scroll < lines.len().saturating_sub(log_area.height as usize) {
+              vertical_scroll = vertical_scroll.saturating_add(log_area.height as usize);
+              vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+            }
+          }
         }
-        break;
       }
     }
   }

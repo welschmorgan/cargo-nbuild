@@ -35,7 +35,7 @@ impl DerefMut for CargoBuild {
   }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Origin {
   Stdout,
   Stderr,
@@ -55,5 +55,17 @@ impl BuildEntry {
       message: msg.as_ref().to_string(),
       origin: orig,
     }
+  }
+
+  pub fn created_at(&self) -> &Instant {
+    &self.created_at
+  }
+
+  pub fn message(&self) -> &String {
+    &self.message
+  }
+
+  pub fn origin(&self) -> Origin {
+    self.origin
   }
 }
