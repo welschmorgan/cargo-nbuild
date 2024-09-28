@@ -115,11 +115,11 @@ impl BuildOutput {
       .map(|e| {
         let mut line = Line::default();
         if e.message().starts_with("error:") {
-          line = line.spans(["error:".bold().yellow(), e.message()[7..].into()]);
+          line = line.spans(["error:".bold().red(), e.message()[7..].into()]);
         } else if e.message().starts_with("warning:") {
           line = line.spans(["warning:".bold().yellow(), e.message()[8..].into()]);
         } else {
-          line.push_span(Span::from(e.message().as_str()));
+          line = line.spans([e.message().as_str().dim()]);
         }
         line
       })

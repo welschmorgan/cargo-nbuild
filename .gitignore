@@ -1,2 +1,4 @@
 /target
 *.log
+test.rs
+test

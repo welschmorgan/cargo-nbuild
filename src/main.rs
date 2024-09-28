@@ -1,4 +1,6 @@
-use cargo_nbuild::{BuildEntry, BuildEvent, BuildOutput, Debug, Origin};
+use cargo_nbuild::{
+  BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Origin, StatusBar,
+};
 use core::panic;
 
 use std::{
@@ -23,16 +25,25 @@ use cargo_nbuild::{BuildCommand, TryLockFor};
 use lazy_static::lazy_static;
 use log::{error, info};
 use ratatui::{
-  crossterm::event::{self, KeyCode, KeyEventKind},
-  layout::{Constraint, Layout, Rect},
+  crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind},
+  layout::{Constraint, Flex, Layout, Rect},
   prelude::Backend,
   restore,
-  style::Stylize,
-  text::{Line, Span},
-  widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+  style::{Color, Stylize},
+  text::{Line, Span, Text},
+  widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
   DefaultTerminal, Terminal,
 };
 use std::io::Write as _;
+
+const HELP_MENU: &'static [(&'static str, &'static str)] = &[
+  ("k", "previous output row"),
+  ("j", "next output row"),
+  ("PageUp", "previous output row"),
+  ("PageDn", "next output row"),
+  ("Home", "go to the first output row"),
+  ("End", "go to the last output row"),
+];
 
 pub struct App {
   threads: VecDeque<JoinHandle<()>>,
@@ -154,8 +165,11 @@ fn render_loop(
   let mut vertical_scroll: usize = 0;
   let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
   let mut main_pane = Rect::default();
+  let mut shortcuts_area = Rect::default();
+  let mut top_area = Rect::default();
   let mut status_area = Rect::default();
   let mut status_entry: Option<BuildEvent> = None;
+  let mut show_help = false;
   loop {
     build.pull(&build_output);
     build.prepare();
@@ -165,8 +179,10 @@ fn render_loop(
     }
     let (num_errs, num_warns) = (build.errors().len(), build.warnings().len());
     terminal.draw(|frame| {
-      [command_area, main_pane] =
+      [top_area, main_pane] =
         Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(frame.area());
+      [command_area, shortcuts_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(top_area);
       [log_area, status_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(main_pane);
 
@@ -185,47 +201,26 @@ fn render_loop(
           .collect::<Vec<_>>(),
       );
       let command = Paragraph::new(Line::default().spans(args)).block(Block::bordered());
+      let shortcuts =
+        Paragraph::new(Line::default().spans(["H: Show help"])).block(Block::bordered());
 
       if let Some(status) = status_entry.as_ref() {
-        let status_bar = Paragraph::new(match status {
-          BuildEvent::BuildStarted => Line::default().spans(["Build ".into(), "running".gray()]),
-          BuildEvent::BuildFinished(exit) => Line::default().spans([
-            "Build ".into(),
-            "finished".bold(),
-            " | ".into(),
-            match exit.success() {
-              true => format!("{}", exit).dim(),
-              false => format!("{}", exit).into(),
-            },
-            " | ".into(),
-            match num_errs {
-              0 => format!("{} error(s)", num_errs).dim(),
-              _ => format!("{} error(s)", num_errs).red(),
-            },
-            " | ".into(),
-            match num_warns {
-              0 => format!("{} warning(s)", num_warns).dim(),
-              _ => format!("{} warning(s)", num_warns).yellow(),
-            },
-          ]),
-        });
+        let status_bar = StatusBar::default()
+          .with_event(*status)
+          .with_num_errors(num_errs)
+          .with_num_warnings(num_warns);
         frame.render_widget(status_bar, status_area);
       }
-      vertical_scroll_state = vertical_scroll_state.content_length(build_lines.len());
-      let log = Paragraph::new(build_lines.clone())
-        .gray()
-        .block(Block::bordered().gray())
-        .scroll((vertical_scroll as u16, 0));
-      // let log = Paragraph::new(lines).block(Block::bordered());
+      let log_view = LogView::default()
+        .with_content(build_lines.clone())
+        .with_scroll(vertical_scroll);
+      frame.render_stateful_widget(log_view, log_area, &mut vertical_scroll_state);
+      frame.render_widget(shortcuts, shortcuts_area);
       frame.render_widget(command, command_area);
-      frame.render_widget(log, log_area);
-      frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-          .begin_symbol(Some("↑"))
-          .end_symbol(Some("↓")),
-        log_area,
-        &mut vertical_scroll_state,
-      );
+      if show_help {
+        let help = HelpMenu::new().with_keys(HELP_MENU);
+        frame.render_widget(help, frame.area());
+      }
     })?;
 
     if event::poll(Duration::from_millis(1))? {
@@ -236,32 +231,53 @@ fn render_loop(
               Debug::log(format!("failed to quit app, {}", e));
             }
             break;
-          } else if key.code == KeyCode::Char('j') {
-            if vertical_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
-              vertical_scroll = vertical_scroll.saturating_add(1);
-              vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-            }
-          } else if key.code == KeyCode::Char('k') {
-            vertical_scroll = vertical_scroll.saturating_sub(1);
-            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-          } else if key.code == KeyCode::End {
-            vertical_scroll = build_lines.len();
-            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-          } else if key.code == KeyCode::Home {
-            vertical_scroll = 0;
-            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-          } else if key.code == KeyCode::PageUp {
-            vertical_scroll = vertical_scroll.saturating_sub(log_area.height as usize);
-            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-          } else if key.code == KeyCode::PageDown {
-            if vertical_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
-              vertical_scroll = vertical_scroll.saturating_add(log_area.height as usize);
-              vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
-            }
           }
+          handle_key_press(
+            key,
+            &mut vertical_scroll,
+            &mut vertical_scroll_state,
+            &log_area,
+            &build_lines,
+            &mut show_help,
+          );
         }
       }
     }
   }
   Ok(())
+}
+
+fn handle_key_press(
+  key: KeyEvent,
+  scroll: &mut usize,
+  state: &mut ScrollbarState,
+  log_area: &Rect,
+  build_lines: &Vec<Line<'_>>,
+  show_help: &mut bool,
+) {
+  if key.code == KeyCode::Char('j') {
+    if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
+      *scroll = scroll.saturating_add(1);
+      *state = state.position(*scroll);
+    }
+  } else if key.code == KeyCode::Char('k') {
+    *scroll = scroll.saturating_sub(1);
+    *state = state.position(*scroll);
+  } else if key.code == KeyCode::Char('h') {
+    *show_help = !*show_help;
+  } else if key.code == KeyCode::End {
+    *scroll = build_lines.len().saturating_sub(log_area.height as usize);
+    *state = state.position(*scroll);
+  } else if key.code == KeyCode::Home {
+    *scroll = 0;
+    *state = state.position(*scroll);
+  } else if key.code == KeyCode::PageUp {
+    *scroll = scroll.saturating_sub(log_area.height as usize);
+    *state = state.position(*scroll);
+  } else if key.code == KeyCode::PageDown {
+    if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
+      *scroll = scroll.saturating_add(log_area.height as usize);
+      *state = state.position(*scroll);
+    }
+  }
 }
