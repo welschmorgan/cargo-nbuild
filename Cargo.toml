@@ -1,0 +1,20 @@
+[package]
+name = "cargo-nbuild"
+version = "0.1.0"
+edition = "2021"
+authors = ["welschmorgan@gmail.com"]
+description = "Wrap cargo build to filter its output"
+
+[[bin]]
+name = "cargo-nbuild"
+
+path = "src/main.rs"
+
+[lib]
+name = "cargo_nbuild"
+path = "src/lib/mod.rs"
+
+[dependencies]
+log = "0.4.22"
+pretty_env_logger = "0.5.0"
+ratatui = { version = "0.28.1", features = ["serde"] }
