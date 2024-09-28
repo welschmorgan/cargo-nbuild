@@ -1,4 +1,4 @@
-use cargo_nbuild::{BuildEntry, Channel, Debug, Origin};
+use cargo_nbuild::{BuildEntry, BuildOutput, Debug, Origin};
 use core::panic;
 
 use std::{
@@ -17,7 +17,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use cargo_nbuild::{CargoBuild, TryLockFor};
+use cargo_nbuild::{BuildCommand, TryLockFor};
 use lazy_static::lazy_static;
 use log::{error, info};
 use ratatui::{
@@ -26,14 +26,11 @@ use ratatui::{
   prelude::Backend,
   restore,
   style::Stylize,
-  text::Line,
+  text::{Line, Span},
   widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
   DefaultTerminal, Terminal,
 };
 use std::io::Write as _;
-
-pub type UserQuitChannel = Channel<bool>;
-pub type BuildOutputChannel = Channel<BuildEntry>;
 
 pub struct App {
   threads: VecDeque<JoinHandle<()>>,
@@ -84,7 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn build(build_output: Sender<BuildEntry>) {
   let args = std::env::args().skip(1).collect::<Vec<_>>();
   Debug::log("build thread started");
-  match CargoBuild::spawn(args) {
+  match BuildCommand::spawn(args) {
     Ok(mut build) => {
       Debug::log("spawned cargo process");
       let out_buf = BufReader::new(build.stdout.take().unwrap());
@@ -141,19 +138,13 @@ fn render_loop(
   user_quit: Sender<bool>,
   build_output: Receiver<BuildEntry>,
 ) -> io::Result<()> {
-  let mut entries = vec![];
+  let mut build = BuildOutput::default();
   let mut vertical_scroll_state = ScrollbarState::default();
   let mut vertical_scroll: usize = 0;
+  let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
   loop {
-    if let Ok(entry) = build_output.try_recv() {
-      Debug::log("Add one build entry");
-      entries.push(entry);
-    }
-    let lines = entries
-      .iter()
-      .map(|e| Line::from(format!("{}", e.message())))
-      .collect::<Vec<_>>();
-    let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
+    build = build.pull(&build_output);
+    let build_lines = build.prepare();
     terminal.draw(|frame| {
       let mut args = vec!["cargo".to_string(), "build".to_string()];
       args.extend(std::env::args().skip(1).collect::<Vec<_>>());
@@ -162,8 +153,8 @@ fn render_loop(
       let command =
         Paragraph::new(Line::default().spans(["cmd".bold(), ":".into(), args.join(" ").into()]))
           .block(Block::bordered());
-      vertical_scroll_state = vertical_scroll_state.content_length(lines.len());
-      let log = Paragraph::new(lines.clone())
+      vertical_scroll_state = vertical_scroll_state.content_length(build_lines.len());
+      let log = Paragraph::new(build_lines.clone())
         .gray()
         .block(Block::bordered().gray())
         .scroll((vertical_scroll as u16, 0));
@@ -188,7 +179,7 @@ fn render_loop(
             }
             break;
           } else if key.code == KeyCode::Char('j') {
-            if vertical_scroll < lines.len().saturating_sub(log_area.height as usize) {
+            if vertical_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
               vertical_scroll = vertical_scroll.saturating_add(1);
               vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
             }
@@ -196,7 +187,7 @@ fn render_loop(
             vertical_scroll = vertical_scroll.saturating_sub(1);
             vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
           } else if key.code == KeyCode::End {
-            vertical_scroll = lines.len();
+            vertical_scroll = build_lines.len();
             vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
           } else if key.code == KeyCode::Home {
             vertical_scroll = 0;
@@ -205,7 +196,7 @@ fn render_loop(
             vertical_scroll = vertical_scroll.saturating_sub(log_area.height as usize);
             vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
           } else if key.code == KeyCode::PageDown {
-            if vertical_scroll < lines.len().saturating_sub(log_area.height as usize) {
+            if vertical_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
               vertical_scroll = vertical_scroll.saturating_add(log_area.height as usize);
               vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
             }
