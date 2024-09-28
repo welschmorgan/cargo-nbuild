@@ -1,7 +1,7 @@
 use std::{
   io,
   ops::{Deref, DerefMut},
-  process::{Child, Command, Stdio},
+  process::{Child, Command, ExitStatus, Stdio},
   sync::mpsc::{channel, Receiver, Sender},
   time::Instant,
 };
@@ -78,42 +78,67 @@ impl BuildEntry {
 #[derive(Default)]
 pub struct BuildOutput {
   entries: Vec<BuildEntry>,
-  // lines: Vec<Line<'a>>,
+  warnings: Vec<usize>, // lines: Vec<Line>,
+  errors: Vec<usize>,   // lines: Vec<Line>,
 }
 
 impl BuildOutput {
-  pub fn push(mut self, e: BuildEntry) -> Self {
+  pub const MARKER_WARNING: &'static str = "warning:";
+  pub const MARKER_ERROR: &'static str = "error:";
+
+  pub fn push(&mut self, e: BuildEntry) {
     self.entries.push(e);
-    self
   }
 
-  pub fn pull(mut self, from: &Receiver<BuildEntry>) -> Self {
+  pub fn pull(&mut self, from: &Receiver<BuildEntry>) {
     while let Ok(entry) = from.try_recv() {
-      self = self.push(entry);
+      self.push(entry);
     }
-    self
   }
 
-  pub fn prepare(&self) -> Vec<Line<'_>> {
-    let new_lines = self
+  pub fn prepare(&mut self) {
+    self.warnings.clear();
+    self.errors.clear();
+    for (i, e) in self.entries.iter().enumerate() {
+      if e.message().starts_with(Self::MARKER_ERROR) {
+        self.errors.push(i);
+      } else if e.message().starts_with(Self::MARKER_WARNING) {
+        self.warnings.push(i);
+      }
+    }
+  }
+
+  pub fn display(&self) -> Vec<Line<'_>> {
+    self
       .entries
       .iter()
       .map(|e| {
         let mut line = Line::default();
-        if e.message().starts_with("warning:") {
-          line = line.spans(["warning:".bold().yellow(), e.message()[8..].into()]);
-        } else if e.message().starts_with("error:") {
+        if e.message().starts_with("error:") {
           line = line.spans(["error:".bold().yellow(), e.message()[7..].into()]);
+        } else if e.message().starts_with("warning:") {
+          line = line.spans(["warning:".bold().yellow(), e.message()[8..].into()]);
         } else {
           line.push_span(Span::from(e.message().as_str()));
         }
         line
       })
-      .collect::<Vec<_>>();
-    new_lines
+      .collect::<Vec<_>>()
   }
 
   pub fn entries(&self) -> &Vec<BuildEntry> {
     &self.entries
   }
+  pub fn errors(&self) -> &Vec<usize> {
+    &self.errors
+  }
+  pub fn warnings(&self) -> &Vec<usize> {
+    &self.warnings
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BuildEvent {
+  BuildStarted,
+  BuildFinished(ExitStatus),
 }

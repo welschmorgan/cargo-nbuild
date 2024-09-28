@@ -1,7 +1,8 @@
-use cargo_nbuild::{BuildEntry, BuildOutput, Debug, Origin};
+use cargo_nbuild::{BuildEntry, BuildEvent, BuildOutput, Debug, Origin};
 use core::panic;
 
 use std::{
+  cell::RefCell,
   collections::VecDeque,
   error::Error,
   fs::File,
@@ -9,6 +10,7 @@ use std::{
   ops::{Deref, DerefMut},
   os,
   process::{Child, Command, Stdio},
+  rc::Rc,
   sync::{
     mpsc::{self, channel, Receiver, RecvTimeoutError, Sender},
     Arc, Mutex, MutexGuard, PoisonError,
@@ -55,11 +57,12 @@ impl App {
   pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
     let (tx_user_quit, rx_user_quit) = channel::<bool>();
     let (tx_build_output, rx_build_output) = channel::<BuildEntry>();
+    let (tx_build_events, rx_build_events) = channel::<BuildEvent>();
     self.threads = VecDeque::from([
       // render
-      spawn(move || render(tx_user_quit, rx_build_output)),
+      spawn(move || render(tx_user_quit, rx_build_output, rx_build_events)),
       // build
-      spawn(move || build(tx_build_output)),
+      spawn(move || build(tx_build_output, tx_build_events)),
     ]);
     let mut th_id = 0;
     while let Some(th) = self.threads.pop_front() {
@@ -78,11 +81,12 @@ fn main() -> Result<(), Box<dyn Error>> {
   App::new().run()
 }
 
-fn build(build_output: Sender<BuildEntry>) {
+fn build(build_output: Sender<BuildEntry>, build_events: Sender<BuildEvent>) {
   let args = std::env::args().skip(1).collect::<Vec<_>>();
   Debug::log("build thread started");
   match BuildCommand::spawn(args) {
     Ok(mut build) => {
+      let _ = build_events.send(BuildEvent::BuildStarted);
       Debug::log("spawned cargo process");
       let out_buf = BufReader::new(build.stdout.take().unwrap());
       let err_buf = BufReader::new(build.stderr.take().unwrap());
@@ -113,6 +117,8 @@ fn build(build_output: Sender<BuildEntry>) {
       // Debug::log("Done waiting for stdout/err threads");
 
       let exit_status = build.wait().expect("failed to wait for cargo");
+
+      let _ = build_events.send(BuildEvent::BuildFinished(exit_status));
       Debug::log(format!("Exit status: {}", exit_status));
     }
     Err(e) => Debug::log(format!("error: failed to spawn cargo build, {}", e)),
@@ -120,12 +126,16 @@ fn build(build_output: Sender<BuildEntry>) {
   Debug::log("build thread stopped");
 }
 
-fn render(user_quit: Sender<bool>, build_output: Receiver<BuildEntry>) {
+fn render(
+  user_quit: Sender<bool>,
+  build_output: Receiver<BuildEntry>,
+  build_events: Receiver<BuildEvent>,
+) {
   Debug::log("render thread started");
   let mut terminal = ratatui::init();
   let _ = terminal.clear();
   App::set_panic_hook();
-  let app_result = render_loop(terminal, user_quit, build_output);
+  let app_result = render_loop(terminal, user_quit, build_output, build_events);
   ratatui::restore();
   if let Err(e) = app_result {
     Debug::log(format!("failed to run app, {}", e));
@@ -137,22 +147,70 @@ fn render_loop(
   mut terminal: DefaultTerminal,
   user_quit: Sender<bool>,
   build_output: Receiver<BuildEntry>,
+  build_events: Receiver<BuildEvent>,
 ) -> io::Result<()> {
   let mut build = BuildOutput::default();
   let mut vertical_scroll_state = ScrollbarState::default();
   let mut vertical_scroll: usize = 0;
   let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
+  let mut main_pane = Rect::default();
+  let mut status_area = Rect::default();
+  let mut status_entry: Option<BuildEvent> = None;
   loop {
-    build = build.pull(&build_output);
-    let build_lines = build.prepare();
+    build.pull(&build_output);
+    build.prepare();
+    let build_lines = build.display();
+    if let Ok(e) = build_events.try_recv() {
+      status_entry = Some(e);
+    }
+    let (num_errs, num_warns) = (build.errors().len(), build.warnings().len());
     terminal.draw(|frame| {
-      let mut args = vec!["cargo".to_string(), "build".to_string()];
-      args.extend(std::env::args().skip(1).collect::<Vec<_>>());
-      [command_area, log_area] =
+      [command_area, main_pane] =
         Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(frame.area());
-      let command =
-        Paragraph::new(Line::default().spans(["cmd".bold(), ":".into(), args.join(" ").into()]))
-          .block(Block::bordered());
+      [log_area, status_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(main_pane);
+
+      let mut args = vec![
+        "cmd".bold(),
+        ":".into(),
+        " ".into(),
+        "cargo".dim(),
+        " ".into(),
+        "build".dim(),
+      ];
+      args.extend(
+        std::env::args()
+          .skip(1)
+          .map(|arg| arg.into())
+          .collect::<Vec<_>>(),
+      );
+      let command = Paragraph::new(Line::default().spans(args)).block(Block::bordered());
+
+      if let Some(status) = status_entry.as_ref() {
+        let status_bar = Paragraph::new(match status {
+          BuildEvent::BuildStarted => Line::default().spans(["Build ".into(), "running".gray()]),
+          BuildEvent::BuildFinished(exit) => Line::default().spans([
+            "Build ".into(),
+            "finished".bold(),
+            " | ".into(),
+            match exit.success() {
+              true => format!("{}", exit).dim(),
+              false => format!("{}", exit).into(),
+            },
+            " | ".into(),
+            match num_errs {
+              0 => format!("{} error(s)", num_errs).dim(),
+              _ => format!("{} error(s)", num_errs).red(),
+            },
+            " | ".into(),
+            match num_warns {
+              0 => format!("{} warning(s)", num_warns).dim(),
+              _ => format!("{} warning(s)", num_warns).yellow(),
+            },
+          ]),
+        });
+        frame.render_widget(status_bar, status_area);
+      }
       vertical_scroll_state = vertical_scroll_state.content_length(build_lines.len());
       let log = Paragraph::new(build_lines.clone())
         .gray()
