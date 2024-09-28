@@ -1,14 +1,23 @@
 use std::{
+  process::ExitStatus,
   sync::{
     mpsc::{self, channel, Receiver, RecvError, SendError, Sender},
     Arc, Mutex,
   },
-  time::Duration,
+  time::{Duration, Instant},
 };
 
+use crate::TryLockFor;
+
 pub enum Event {
-  Dummy,
-  Quit,
+  // Cargo build wrote something on stdout
+  OutputLine(String),
+  // Cargo build wrote something on stderr
+  ErrorLine(String),
+  // Cargo build finished
+  FinishedExecution(ExitStatus),
+  // User pressed 'q'
+  UserQuitRequest,
 }
 
 pub struct EventBusInner {
@@ -17,7 +26,7 @@ pub struct EventBusInner {
 }
 
 #[derive(Clone)]
-pub struct EventBus(Arc<Mutex<EventBusInner>>);
+pub struct EventBus(Arc<EventBusInner>);
 
 unsafe impl Send for EventBus {}
 unsafe impl Sync for EventBus {}
@@ -25,24 +34,34 @@ unsafe impl Sync for EventBus {}
 impl EventBus {
   pub fn new() -> Self {
     let (tx, rx) = channel::<Event>();
-    Self(Arc::new(Mutex::new(EventBusInner {
+    Self(Arc::new(EventBusInner {
       sender: tx,
       receiver: rx,
-    })))
+    }))
   }
 
   pub fn send(&self, evt: Event) -> Result<(), SendError<Event>> {
-    let g = self.0.lock().unwrap();
-    g.sender.send(evt)
+    self.0.sender.send(evt)
   }
 
   pub fn recv(&self) -> Result<Event, RecvError> {
-    let g = self.0.lock().unwrap();
-    g.receiver.recv()
+    self.0.receiver.recv()
   }
 
   pub fn recv_timeout(&self, dur: Duration) -> Result<Event, mpsc::RecvTimeoutError> {
-    let g = self.0.lock().unwrap();
-    g.receiver.recv_timeout(dur)
+    self.0.receiver.recv_timeout(dur)
+  }
+
+  // recv all possible events in the supplied duration
+  pub fn pump(&self, dur: Duration) -> Vec<Event> {
+    let mut ret = vec![];
+    let start = Instant::now();
+    let end = start + dur;
+    while Instant::now() < end {
+      if let Ok(evt) = self.recv_timeout(dur) {
+        ret.push(evt);
+      }
+    }
+    ret
   }
 }
