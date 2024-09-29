@@ -2,7 +2,7 @@ use crate::{BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Origi
 
 use std::{
   collections::VecDeque,
-  io::{self, stdin, BufRead, BufReader},
+  io::{self, stdin, stdout, BufRead, BufReader},
   process::ExitStatus,
   sync::mpsc::{channel, Receiver, Sender},
   thread::{spawn, JoinHandle},
@@ -11,7 +11,13 @@ use std::{
 
 use crate::BuildCommand;
 use ratatui::{
-  crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind},
+  crossterm::{
+    event::{
+      self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind,
+      MouseEventKind,
+    },
+    execute,
+  },
   layout::{Constraint, Layout, Rect},
   restore,
   style::Stylize,
@@ -52,6 +58,7 @@ impl App {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
       let _ = restore();
+      let _ = execute!(stdout(), DisableMouseCapture);
       Debug::log(format!("Panic {:?}", panic_info));
       hook(panic_info);
     }));
@@ -61,6 +68,7 @@ impl App {
   pub fn run(&mut self) -> Result<(), crate::Error> {
     let mut terminal = ratatui::init();
     let _ = terminal.clear();
+    let _ = execute!(stdout(), EnableMouseCapture);
     App::set_panic_hook();
 
     let (tx_user_quit, _rx_user_quit) = channel::<bool>();
@@ -189,6 +197,7 @@ fn render(
   Debug::log("render thread started");
   let app_result = render_loop(options, terminal, user_quit, build_output, build_events);
   ratatui::restore();
+  let _ = execute!(stdout(), DisableMouseCapture);
   if let Err(e) = app_result {
     Debug::log(format!("failed to run app, {}", e));
   }
@@ -273,23 +282,37 @@ fn render_loop(
     // }
 
     if event::poll(Duration::from_micros(100))? {
-      if let event::Event::Key(key) = event::read()? {
-        if key.kind == KeyEventKind::Press {
-          if key.code == KeyCode::Char('q') {
-            if let Err(e) = user_quit.send(true) {
-              Debug::log(format!("failed to quit app, {}", e));
-            }
-            break;
+      match event::read()? {
+        event::Event::Mouse(mouse) => match mouse.kind {
+          MouseEventKind::ScrollDown => {
+            vertical_scroll = vertical_scroll.saturating_add(1);
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
           }
-          handle_key_press(
-            key,
-            &mut vertical_scroll,
-            &mut vertical_scroll_state,
-            &log_area,
-            &build_lines,
-            &mut show_help,
-          );
+          MouseEventKind::ScrollUp => {
+            vertical_scroll = vertical_scroll.saturating_sub(1);
+            vertical_scroll_state = vertical_scroll_state.position(vertical_scroll);
+          }
+          _ => {}
+        },
+        event::Event::Key(key) => {
+          if key.kind == KeyEventKind::Press {
+            if key.code == KeyCode::Char('q') {
+              if let Err(e) = user_quit.send(true) {
+                Debug::log(format!("failed to quit app, {}", e));
+              }
+              break;
+            }
+            handle_key_press(
+              key,
+              &mut vertical_scroll,
+              &mut vertical_scroll_state,
+              &log_area,
+              &build_lines,
+              &mut show_help,
+            );
+          }
         }
+        _ => {}
       }
     }
   }
