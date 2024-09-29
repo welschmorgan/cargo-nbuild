@@ -6,6 +6,7 @@ use ratatui::{
   },
 };
 
+/// Support display of build entries
 #[derive(Default)]
 pub struct LogView<'a> {
   scroll: usize,
@@ -13,11 +14,13 @@ pub struct LogView<'a> {
 }
 
 impl<'a> LogView<'a> {
+  /// Define the scroll bar value
   pub fn with_scroll(mut self, v: usize) -> Self {
     self.scroll = v;
     self
   }
 
+  /// Update the displayed lines
   pub fn with_content(mut self, content: Vec<Line<'a>>) -> Self {
     self.content = content;
     self

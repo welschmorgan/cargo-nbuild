@@ -5,15 +5,18 @@ use ratatui::{
   widgets::{Block, Clear, Paragraph, Widget},
 };
 
+/// The help menu displayed as a popup
 pub struct HelpMenu {
   keys: Vec<[String; 2]>,
 }
 
 impl HelpMenu {
+  /// Construct this object
   pub fn new() -> Self {
     Self { keys: vec![] }
   }
 
+  /// The keybindings section to be displayed
   pub fn with_keys<K: AsRef<str>, V: AsRef<str>>(mut self, keys: &[(K, V)]) -> Self {
     self.keys.extend(
       keys
