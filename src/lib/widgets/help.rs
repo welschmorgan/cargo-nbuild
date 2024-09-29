@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use ratatui::{
   layout::{Constraint, Flex, Layout, Rect},
   style::Stylize,

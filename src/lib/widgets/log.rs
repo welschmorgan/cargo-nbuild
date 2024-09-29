@@ -45,3 +45,14 @@ impl<'a> StatefulWidget for LogView<'a> {
       .render(area, buf, state)
   }
 }
+
+// impl<'a> StatefulWidget for LogView<'a> {
+//   type State = ListState;
+
+//   fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+//     let log = List::new(self.content)
+//       .gray()
+//       .block(Block::bordered().gray());
+//     Widget::render(log, area, buf);
+//   }
+// }

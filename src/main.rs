@@ -4,37 +4,25 @@ use cargo_nbuild::{
 use core::panic;
 
 use std::{
-  cell::RefCell,
   collections::VecDeque,
   error::Error,
-  fs::File,
-  io::{self, BufRead, BufReader, Read},
-  ops::{Deref, DerefMut},
-  os,
-  process::{Child, Command, Stdio},
-  rc::Rc,
-  sync::{
-    mpsc::{self, channel, Receiver, RecvTimeoutError, Sender},
-    Arc, Mutex, MutexGuard, PoisonError,
-  },
+  io::{self, stdin, BufRead, BufReader, IsTerminal, Read},
+  process::ExitStatus,
+  sync::mpsc::{channel, Receiver, Sender},
   thread::{spawn, JoinHandle},
   time::{Duration, Instant},
 };
 
-use cargo_nbuild::{BuildCommand, TryLockFor};
-use lazy_static::lazy_static;
-use log::{error, info};
+use cargo_nbuild::BuildCommand;
 use ratatui::{
   crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind},
-  layout::{Constraint, Flex, Layout, Rect},
-  prelude::Backend,
+  layout::{Constraint, Layout, Rect},
   restore,
-  style::{Color, Stylize},
-  text::{Line, Span, Text},
-  widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-  DefaultTerminal, Terminal,
+  style::Stylize,
+  text::Line,
+  widgets::{Block, Paragraph, ScrollbarState},
+  DefaultTerminal,
 };
-use std::io::Write as _;
 
 const HELP_MENU: &'static [(&'static str, &'static str)] = &[
   ("k", "previous output row"),
@@ -46,12 +34,14 @@ const HELP_MENU: &'static [(&'static str, &'static str)] = &[
 ];
 
 pub struct App {
+  options: AppOptions,
   threads: VecDeque<JoinHandle<()>>,
 }
 
 impl App {
-  pub fn new() -> Self {
+  pub fn new(options: AppOptions) -> Self {
     Self {
+      options,
       threads: VecDeque::new(),
     }
   }
@@ -60,20 +50,32 @@ impl App {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
       let _ = restore();
-      Debug::log("Recovered from panic!");
+      Debug::log(format!("Panic {:?}", panic_info));
       hook(panic_info);
     }));
   }
 
   pub fn run(&mut self) -> Result<(), Box<dyn Error>> {
-    let (tx_user_quit, rx_user_quit) = channel::<bool>();
-    let (tx_build_output, rx_build_output) = channel::<BuildEntry>();
+    let (tx_user_quit, _rx_user_quit) = channel::<bool>();
+    let (tx_build_output, rx_build_output) = channel::<Vec<BuildEntry>>();
     let (tx_build_events, rx_build_events) = channel::<BuildEvent>();
+    let render_options = self.options.clone();
+    let build_options = self.options.clone();
     self.threads = VecDeque::from([
       // render
-      spawn(move || render(tx_user_quit, rx_build_output, rx_build_events)),
+      spawn(move || {
+        render(
+          render_options,
+          tx_user_quit,
+          rx_build_output,
+          rx_build_events,
+        )
+      }),
       // build
-      spawn(move || build(tx_build_output, tx_build_events)),
+      spawn(move || match build_options.stdin {
+        true => scan_stdin(tx_build_output, tx_build_events),
+        false => build(build_options, tx_build_output, tx_build_events),
+      }),
     ]);
     let mut th_id = 0;
     while let Some(th) = self.threads.pop_front() {
@@ -88,12 +90,129 @@ impl App {
   }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-  App::new().run()
+#[derive(Default, Clone)]
+pub struct AppOptions {
+  stdin: bool,
+  build_args: Vec<String>,
 }
 
-fn build(build_output: Sender<BuildEntry>, build_events: Sender<BuildEvent>) {
-  let args = std::env::args().skip(1).collect::<Vec<_>>();
+impl AppOptions {
+  pub fn parse(mut self) -> Self {
+    if !stdin().is_terminal() {
+      self.stdin = true
+    }
+    self.build_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if self.build_args.len() != 0 && self.stdin {
+      panic!("Cannot have both stdin content and command-line arguments")
+    }
+    self
+  }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+  let opt = AppOptions::default().parse();
+  App::new(opt).run()
+}
+
+fn scan_stdin(build_output: Sender<Vec<BuildEntry>>, build_events: Sender<BuildEvent>) {
+  Debug::log("scan thread started");
+  let _ = build_events.send(BuildEvent::BuildStarted);
+  Debug::log("spawned cargo process");
+  let buf = BufReader::new(stdin());
+  let events = build_output.clone();
+  let thread = spawn(move || {
+    let entries = buf
+      .lines()
+      .map(|line| {
+        let line = line.expect("invalid output line");
+        Debug::log(format!("[stdin] {}", line));
+        BuildEntry::new(line, Origin::Stdout)
+      })
+      .collect::<Vec<_>>();
+    let _ = events.send(entries);
+  });
+  // Debug::log("Waiting for stdout/err threads");
+  thread.join().expect("failed to join process reader thread");
+  // Debug::log("Done waiting for stdout/err threads");
+
+  let exit_status = ExitStatus::default();
+  let _ = build_events.send(BuildEvent::BuildFinished(exit_status));
+  Debug::log(format!("Exit status: {}", exit_status));
+  Debug::log("scan thread stopped");
+}
+
+pub struct BatchLineReader<R: ?Sized> {
+  reader: Box<BufReader<R>>,
+  has_more_batches: bool,
+  max_time_per_batch: Option<Duration>,
+  max_lines_per_batch: Option<usize>,
+}
+
+impl<R: Read> BatchLineReader<R> {
+  pub fn new(r: R) -> Self {
+    Self {
+      reader: Box::new(BufReader::new(r)),
+      has_more_batches: true,
+      max_time_per_batch: None,
+      max_lines_per_batch: None,
+    }
+  }
+
+  pub fn has_more_batches(&self) -> bool {
+    self.has_more_batches
+  }
+
+  pub fn next_line(&mut self) -> Option<String> {
+    let mut buf = String::new();
+    if let Ok(nbytes) = self.reader.read_line(&mut buf) {
+      if nbytes == 0 {
+        self.has_more_batches = false;
+      }
+      return Some(buf);
+    }
+    return None;
+  }
+
+  pub fn next_batch(&mut self) -> Option<Vec<String>> {
+    let batch_start = Instant::now();
+    let batch_end = self
+      .max_time_per_batch
+      .map(|max_time| batch_start + max_time);
+    let mut ret = vec![];
+    let mut limit_reached = false;
+    loop {
+      let time_limit_reached = match batch_end {
+        Some(batch_end) => Instant::now() >= batch_end,
+        None => false,
+      };
+      let line_limit_reached = match self.max_lines_per_batch {
+        Some(line_limit) => ret.len() >= line_limit,
+        None => false,
+      };
+      if time_limit_reached || line_limit_reached {
+        limit_reached = true;
+        break;
+      }
+      match self.next_line() {
+        Some(line) => ret.push(line),
+        None => break,
+      }
+    }
+    if ret.len() == 0 && !limit_reached {
+      // we didn't receive anything and no limit was reached
+      // which means we encountered EOF
+      return None;
+    }
+    return Some(ret);
+  }
+}
+
+fn build(
+  options: AppOptions,
+  build_output: Sender<Vec<BuildEntry>>,
+  build_events: Sender<BuildEvent>,
+) {
+  let args = options.build_args;
   Debug::log("build thread started");
   match BuildCommand::spawn(args) {
     Ok(mut build) => {
@@ -108,14 +227,14 @@ fn build(build_output: Sender<BuildEntry>, build_events: Sender<BuildEvent>) {
         for line in out_buf.lines() {
           let line = line.expect("invalid output line");
           Debug::log(format!("[stdout] {}", line));
-          let _ = stdout_events.send(BuildEntry::new(line, Origin::Stdout));
+          let _ = stdout_events.send(vec![BuildEntry::new(line, Origin::Stdout)]);
         }
       });
       let stderr_thread = spawn(move || {
         for line in err_buf.lines() {
           let line = line.expect("invalid error line");
           Debug::log(format!("[stderr] {}", line));
-          let _ = stderr_events.send(BuildEntry::new(line, Origin::Stderr));
+          let _ = stderr_events.send(vec![BuildEntry::new(line, Origin::Stderr)]);
         }
       });
       // Debug::log("Waiting for stdout/err threads");
@@ -138,15 +257,16 @@ fn build(build_output: Sender<BuildEntry>, build_events: Sender<BuildEvent>) {
 }
 
 fn render(
+  options: AppOptions,
   user_quit: Sender<bool>,
-  build_output: Receiver<BuildEntry>,
+  build_output: Receiver<Vec<BuildEntry>>,
   build_events: Receiver<BuildEvent>,
 ) {
   Debug::log("render thread started");
   let mut terminal = ratatui::init();
   let _ = terminal.clear();
   App::set_panic_hook();
-  let app_result = render_loop(terminal, user_quit, build_output, build_events);
+  let app_result = render_loop(options, terminal, user_quit, build_output, build_events);
   ratatui::restore();
   if let Err(e) = app_result {
     Debug::log(format!("failed to run app, {}", e));
@@ -155,12 +275,15 @@ fn render(
 }
 
 fn render_loop(
+  options: AppOptions,
   mut terminal: DefaultTerminal,
   user_quit: Sender<bool>,
-  build_output: Receiver<BuildEntry>,
+  build_output: Receiver<Vec<BuildEntry>>,
   build_events: Receiver<BuildEvent>,
 ) -> io::Result<()> {
-  let mut build = BuildOutput::default();
+  let mut build = BuildOutput::default()
+    .with_noise_removed(false)/* 
+    .with_update_threshold(Duration::from_millis(50)) */;
   let mut vertical_scroll_state = ScrollbarState::default();
   let mut vertical_scroll: usize = 0;
   let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
@@ -172,11 +295,13 @@ fn render_loop(
   let mut show_help = false;
   loop {
     build.pull(&build_output);
-    build.prepare();
+    // let output_changed = build.prepare();
+    build.prepare_mt();
     let build_lines = build.display();
     if let Ok(e) = build_events.try_recv() {
       status_entry = Some(e);
     }
+    // if first_render || output_changed || key_event {
     let (num_errs, num_warns) = (build.errors().len(), build.warnings().len());
     terminal.draw(|frame| {
       [top_area, main_pane] =
@@ -186,14 +311,12 @@ fn render_loop(
       [log_area, status_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(main_pane);
 
-      let mut args = vec![
-        "cmd".bold(),
-        ":".into(),
-        " ".into(),
-        "cargo".dim(),
-        " ".into(),
-        "build".dim(),
-      ];
+      let mut args = vec!["cmd".bold(), ":".into(), " ".into()];
+      if options.stdin {
+        args.extend_from_slice(&["stdin".dim()]);
+      } else {
+        args.extend_from_slice(&["cargo".dim(), " ".into(), "build".dim()]);
+      }
       args.extend(
         std::env::args()
           .skip(1)
@@ -207,6 +330,8 @@ fn render_loop(
       if let Some(status) = status_entry.as_ref() {
         let status_bar = StatusBar::default()
           .with_event(*status)
+          .with_num_prepared_lines(build.cursor())
+          .with_num_output_lines(build.entries().len())
           .with_num_errors(num_errs)
           .with_num_warnings(num_warns);
         frame.render_widget(status_bar, status_area);
@@ -215,6 +340,7 @@ fn render_loop(
         .with_content(build_lines.clone())
         .with_scroll(vertical_scroll);
       frame.render_stateful_widget(log_view, log_area, &mut vertical_scroll_state);
+      // frame.render_stateful_widget(log_view, log_area, &mut list_state);
       frame.render_widget(shortcuts, shortcuts_area);
       frame.render_widget(command, command_area);
       if show_help {
@@ -222,8 +348,9 @@ fn render_loop(
         frame.render_widget(help, frame.area());
       }
     })?;
+    // }
 
-    if event::poll(Duration::from_millis(1))? {
+    if event::poll(Duration::from_micros(100))? {
       if let event::Event::Key(key) = event::read()? {
         if key.kind == KeyEventKind::Press {
           if key.code == KeyCode::Char('q') {
