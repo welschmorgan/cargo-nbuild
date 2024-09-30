@@ -2,14 +2,15 @@ use std::{
   fmt::Display,
   io,
   ops::{Deref, DerefMut, Range},
-  path::PathBuf,
+  path::{Path, PathBuf},
   process::{Child, Command, ExitStatus, Stdio},
+  str::FromStr,
   sync::{
     mpsc::{channel, Receiver},
-    Arc,
+    Arc, Mutex,
   },
   thread::spawn,
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use lazy_static::lazy_static;
@@ -19,7 +20,10 @@ use ratatui::{
 };
 use regex::Regex;
 
-use crate::{dbg, CapturedMarker, Debug, Marker, Markers, BUILD_MARKERS};
+use crate::{
+  dbg, err, CapturedMarker, Debug, DeclaredMarker, Error, ErrorKind, MarkerRef, Markers,
+  TryLockFor, BUILD_MARKERS,
+};
 
 /// Represent the `cargo build` process.
 pub struct BuildCommand(Child);
@@ -76,6 +80,84 @@ pub struct Location {
   column: Option<usize>,
 }
 
+impl FromStr for Location {
+  type Err = crate::Error;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    let parts = s.split(':').collect::<Vec<_>>();
+    let path: PathBuf = parts[0].into();
+    let mut line = None;
+    let mut column = None;
+    if parts.len() > 1 {
+      line = match parts[1].parse::<usize>() {
+        Ok(line_num) => Some(line_num),
+        Err(e) => {
+          crate::dbg!("error: failed to parse line num from '{}', {}", parts[1], e);
+          None
+        }
+      };
+    }
+    if parts.len() > 2 {
+      column = match parts[2].parse::<usize>() {
+        Ok(line_num) => Some(line_num),
+        Err(e) => {
+          return Err(Error::new(
+            ErrorKind::Parsing,
+            Some(format!(
+              "error: failed to parse column num from '{}', {}",
+              parts[2], e
+            )),
+            None,
+            Some(crate::here!()),
+          ));
+        }
+      };
+    }
+    return Ok(Location { path, line, column });
+  }
+}
+
+impl Display for Location {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "{}{}{}",
+      self.path.display(),
+      match self.line {
+        Some(l) => format!(": {}", l),
+        None => String::new(),
+      },
+      match self.line {
+        Some(_) => match self.column {
+          Some(c) => format!(": {}", c),
+          None => String::new(),
+        },
+        None => String::new(),
+      }
+    )
+  }
+}
+impl Location {
+  pub fn new<P: AsRef<Path>>(path: P, line: Option<usize>, column: Option<usize>) -> Self {
+    Self {
+      path: path.as_ref().to_path_buf(),
+      line,
+      column,
+    }
+  }
+}
+
+#[macro_export]
+macro_rules! here {
+  () => {
+    $crate::Location::new(
+      std::path::PathBuf::from(file!()),
+      Some(line!() as usize),
+      Some(column!() as usize),
+    )
+  };
+}
+
 /// Represent the kind of a BuildTag, put on each [`BuildEntry`]
 #[derive(Debug, Clone, PartialEq, PartialOrd, Copy)]
 pub enum BuildTagKind {
@@ -112,7 +194,7 @@ impl BuildTag {
       kind: k,
       marker: Some(CapturedMarker {
         range,
-        capture: capture.as_ref().to_string(),
+        text: capture.as_ref().to_string(),
       }),
       location: None,
     }
@@ -143,9 +225,9 @@ impl BuildTag {
   }
 
   /// Construct a location tag (next line after [`BuildTagKind::Error`]/[`BuildTagKind::Warning`] markers)
-  pub fn location<P: AsRef<PathBuf>>(path: P, line: Option<usize>, column: Option<usize>) -> Self {
+  pub fn location<P: AsRef<Path>>(path: P, line: Option<usize>, column: Option<usize>) -> Self {
     Self {
-      kind: BuildTagKind::Error,
+      kind: BuildTagKind::Location,
       marker: None,
       location: Some(Location {
         path: path.as_ref().to_path_buf(),
@@ -193,6 +275,11 @@ impl BuildEntry {
     self
   }
 
+  pub fn with_created_at(mut self, at: Instant) -> Self {
+    self.created_at = at;
+    self
+  }
+
   /// Retrieve the [`Instant`] this entry was created
   pub fn created_at(&self) -> &Instant {
     &self.created_at
@@ -228,10 +315,10 @@ impl BuildEntry {
   }
 
   /// Retrieve any [`Marker`] associated to this tag
-  pub fn marker(&self) -> Option<(BuildTagKind, Option<&CapturedMarker>)> {
+  pub fn marker(&self) -> Option<MarkerRef> {
     for known_marker in BUILD_MARKERS.iter() {
       if let Some(tag) = self.tag(known_marker.tag) {
-        return Some((tag.kind, tag.marker.as_ref()));
+        return Some(MarkerRef::new(tag.kind, tag.marker.as_ref(), known_marker));
       }
     }
     return None;
@@ -290,6 +377,44 @@ impl BuildEntry {
 impl<S: AsRef<str>> From<S> for BuildEntry {
   fn from(value: S) -> Self {
     BuildEntry::new(value.as_ref(), Origin::default())
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkedBlock<'a> {
+  marker: MarkerRef<'a>,
+  range: Range<usize>,
+  entries: Vec<&'a BuildEntry>,
+}
+
+impl<'a> MarkedBlock<'a> {
+  pub fn new(marker: MarkerRef<'a>, range: Range<usize>, entries: Vec<&'a BuildEntry>) -> Self {
+    Self {
+      marker,
+      range,
+      entries,
+    }
+  }
+
+  pub fn marker(&self) -> &MarkerRef<'a> {
+    &self.marker
+  }
+  pub fn marker_mut(&mut self) -> &mut MarkerRef<'a> {
+    &mut self.marker
+  }
+
+  pub fn range(&self) -> &Range<usize> {
+    &self.range
+  }
+  pub fn range_mut(&mut self) -> &mut Range<usize> {
+    &mut self.range
+  }
+
+  pub fn entries(&self) -> &Vec<&'a BuildEntry> {
+    &self.entries
+  }
+  pub fn entries_mut(&mut self) -> &mut Vec<&'a BuildEntry> {
+    &mut self.entries
   }
 }
 
@@ -358,6 +483,11 @@ impl<'a> BuildOutput<'a> {
   /// Add a new build entry to the unprocessed queue
   pub fn push(&mut self, e: BuildEntry) {
     self.entries.push(e);
+  }
+
+  /// Add multiple build entries to the unprocessed queue
+  pub fn extend<I: IntoIterator<Item = BuildEntry>>(&mut self, entries: I) {
+    self.entries.extend(entries);
   }
 
   /// Pull all build entries from the supplied [`Receiver`].
@@ -438,6 +568,46 @@ impl<'a> BuildOutput<'a> {
     &mut self.markers
   }
 
+  pub fn extract_location<M: AsRef<str>>(message: M) -> crate::Result<Option<Location>> {
+    let trimmed_message = message.as_ref().trim();
+    if trimmed_message.starts_with("-->") {
+      return Ok(Some(trimmed_message[3..].trim().parse::<Location>()?));
+    }
+    Ok(None)
+  }
+
+  pub fn block_range_at(&self, entry_id: usize) -> Option<Range<usize>> {
+    if self.markers.is_empty() {
+      return None;
+    }
+    let mut found = None;
+    for chunks in self.markers.chunks(2) {
+      let (marker_before, _) = chunks[0];
+      let marker_after = chunks.get(1).map(|(id, tag)| *id);
+      if entry_id >= marker_before && (marker_after.is_none() || entry_id < marker_after.unwrap()) {
+        found = Some((marker_before, marker_after));
+        break;
+      }
+    }
+    found
+      .or_else(|| Some((self.markers.last().unwrap().0, None)))
+      .map(|(before, after)| Range {
+        start: before,
+        end: after.unwrap_or_else(|| self.entries.len()),
+      })
+  }
+
+  pub fn block_at(&'a self, entry_id: usize) -> Option<MarkedBlock<'a>> {
+    if let Some(range) = self.block_range_at(entry_id) {
+      let marker = self.entries[range.start].marker().unwrap();
+      let entries = self.entries[range.start..range.end]
+        .iter()
+        .collect::<Vec<_>>();
+      return Some(MarkedBlock::new(marker, range, entries));
+    }
+    None
+  }
+
   /// Prepare the entries that have not been processed yet
   /// by batch processing in multiple threads.
   pub fn prepare(&mut self) {
@@ -447,11 +617,13 @@ impl<'a> BuildOutput<'a> {
     let mut recv = vec![];
 
     struct PreparedEntry<'a> {
-      batch_id: usize,
-      entry_id: usize,
-      entry: BuildEntry,
-      display: Line<'a>,
+      pub batch_id: usize,
+      pub entry_id: usize,
+      pub entry: BuildEntry,
+      pub display: Line<'a>,
     }
+
+    let locations: Arc<Mutex<Vec<(usize, Location)>>> = Arc::new(Mutex::new(Vec::new()));
 
     if let Some(batches) = self.batch_unprepared_entries() {
       for (batch_id, mut batch) in batches {
@@ -459,42 +631,42 @@ impl<'a> BuildOutput<'a> {
         let (tx, rx) = channel::<(usize, Vec<PreparedEntry<'_>>)>();
         recv.push(rx);
         let style_log = Style::default().dim();
+        let th_locations = locations.clone();
         threads.push(spawn(move || {
           Debug::log(format!(
             "preparing batch #{} -> {} entries",
             batch_id,
             batch.len()
           ));
-          let mut ret = vec![];
+          let mut ret: Vec<PreparedEntry<'_>> = vec![];
           for (_, entry) in &mut batch {
             Markers::prepare(entry);
           }
           let margin_width = batch
             .iter()
             .map(|(_id, entry)| {
-              if let Some((_kind, captured)) = entry.marker() {
-                return captured.as_ref().unwrap().capture.len();
+              if let Some(marker) = entry.marker() {
+                return marker.captured().unwrap().text.len();
               }
               return 0;
             })
             .max();
-          for (entry_id, entry) in batch {
+          for (batch_entry_id, (global_entry_id, entry)) in batch.into_iter().enumerate() {
             let mut line = Line::default(); //format!("{} | {}", entry_id, entry.message().to_string());
             let mut margin = Span::default();
             let mut message = entry.message.clone();
-            let mut found_marker = false;
-            for known_marker in BUILD_MARKERS.iter() {
-              if let Some(tag) = entry.tag(known_marker.tag) {
-                dbg!("entry #{} is a marker: {}", entry_id, tag.kind);
-                let captured = tag.marker.as_ref().unwrap();
-                margin = margin.content(captured.capture.clone());
-                margin = margin.style(known_marker.style);
-                message = message.as_str()[captured.range.end..].to_string();
-                found_marker = true;
-                break;
+            if let Some(marker) = entry.marker() {
+              dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
+              let captured = marker.captured().unwrap();
+              margin = margin.content(captured.text.clone());
+              margin = margin.style(marker.declared().style);
+              message = message.as_str()[captured.range.end..].to_string();
+            } else {
+              if let Ok(Some(loc)) = Self::extract_location(message.as_str()) {
+                if let Ok(mut g) = th_locations.try_lock_for(Duration::from_millis(150)) {
+                  g.push((global_entry_id, loc));
+                }
               }
-            }
-            if !found_marker {
               margin = margin.content(" ".repeat(margin_width.unwrap_or_else(|| 4)));
               margin = margin.style(style_log);
             }
@@ -503,8 +675,8 @@ impl<'a> BuildOutput<'a> {
             line.push_span(message);
             ret.push(PreparedEntry {
               batch_id,
-              entry_id: entry_id,
-              entry: entry,
+              entry_id: global_entry_id,
+              entry,
               display: line,
             });
           }
@@ -533,6 +705,20 @@ impl<'a> BuildOutput<'a> {
         }
       }
       *self.markers.tags_mut() = Markers::from(self.entries.as_slice()).tags().clone();
+      if let Ok(g) = locations.lock() {
+        for (entry_id, location) in g.iter() {
+          let block = self.block_at(*entry_id);
+          if let Some(block) = block {
+            for i in block.range {
+              self.entries[i].set_tag(BuildTag::location(
+                location.path.clone(),
+                location.line,
+                location.column,
+              ))
+            }
+          }
+        }
+      }
       dbg!(
         "prepare_mt: done preparing {} entries in {}s (selected marker: {:?})",
         num_prepared,
@@ -577,6 +763,19 @@ impl<'a> BuildOutput<'a> {
   }
 }
 
+impl<'a, T: Into<BuildEntry>, I: IntoIterator<Item = T>> From<I> for BuildOutput<'a> {
+  fn from(value: I) -> Self {
+    let mut ret = BuildOutput::default();
+    ret.extend(
+      value
+        .into_iter()
+        .map(|item| item.into())
+        .collect::<Vec<_>>(),
+    );
+    ret
+  }
+}
+
 /// Represent a cargo build event
 #[derive(Debug, Clone, Copy)]
 pub enum BuildEvent {
@@ -584,4 +783,90 @@ pub enum BuildEvent {
   BuildStarted,
   /// Cargo process finished
   BuildFinished(ExitStatus),
+}
+
+#[cfg(test)]
+mod tests {
+  use std::ops::Range;
+
+  use crate::{
+    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef,
+    Origin,
+  };
+
+  use super::BuildOutput;
+
+  #[test]
+  fn prepare() {
+    let sample_output = r#"warning: field `batch_id` is never read
+   --> src/lib\build.rs:450:7
+    |
+449 |     struct PreparedEntry<'a> {
+    |            ------------- field in this struct
+450 |       batch_id: usize,
+    |       ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default"#;
+    let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
+    build.prepare();
+    let unprepared = build.entries();
+    let lines = build.display();
+    assert_eq!(unprepared.len(), lines.len());
+    assert_eq!(
+      unprepared[0],
+      BuildEntry::new("warning: field `batch_id` is never read", Origin::default())
+        .with_tags(vec![
+          BuildTag::warning(0..8, "warning:"),
+          BuildTag::location("src/lib\\build.rs", Some(450), Some(7))
+        ])
+        .with_created_at(unprepared[0].created_at)
+    );
+  }
+
+  #[test]
+  fn block_range_at() {
+    let sample_output = r#"warning: field `batch_id` is never read
+    blasdf
+    asdf asdf asdf
+    adsf s
+    error: test error
+    blasdf asdfl alsdf
+    asdfasdf"#;
+    let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
+    build.prepare();
+    assert_eq!(build.block_range_at(1), Some(Range { start: 0, end: 4 }));
+    assert_eq!(build.block_range_at(5), Some(Range { start: 4, end: 7 }));
+  }
+
+  #[test]
+  fn block_at() {
+    let sample_output = r#"warning: field `batch_id` is never read
+    blasdf
+    asdf asdf asdf
+    adsf s
+    error: test error
+    blasdf asdfl alsdf
+    asdfasdf"#;
+    let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
+    build.prepare();
+    assert_eq!(
+      build.block_at(1),
+      Some(MarkedBlock::new(
+        MarkerRef::known(
+          BuildTagKind::Warning,
+          Some(&CapturedMarker::new(0, "warning:"))
+        ),
+        0..4,
+        build.entries[0..4].iter().collect::<Vec<_>>(),
+      ))
+    );
+    assert_eq!(
+      build.block_at(5),
+      Some(MarkedBlock::new(
+        MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(4, "error:"))),
+        4..7,
+        build.entries[4..7].iter().collect::<Vec<_>>(),
+      ))
+    );
+  }
 }

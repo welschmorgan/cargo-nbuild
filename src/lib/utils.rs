@@ -4,7 +4,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use crate::{Error, ErrorKind};
+use crate::{err, Error, ErrorKind};
 
 /// A trait to support trying to lock a mutex for a certain amount of time
 pub trait TryLockFor<T> {
@@ -22,7 +22,7 @@ impl<T> TryLockFor<T> for Mutex<T> {
       }
       std::thread::sleep(Duration::from_millis(10));
     }
-    Err(Error::new(ErrorKind::LockTimeout, None, None))
+    Err(err!(ErrorKind::LockTimeout))
   }
 }
 
