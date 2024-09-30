@@ -13,16 +13,13 @@ use std::{
   time::{Duration, Instant},
 };
 
-use lazy_static::lazy_static;
 use ratatui::{
   style::{Style, Stylize},
   text::{Line, Span},
 };
-use regex::Regex;
 
 use crate::{
-  dbg, err, CapturedMarker, Debug, DeclaredMarker, Error, ErrorKind, MarkerRef, Markers,
-  TryLockFor, BUILD_MARKERS,
+  dbg, CapturedMarker, Debug, Error, ErrorKind, MarkerRef, Markers, TryLockFor, BUILD_MARKERS,
 };
 
 /// Represent the `cargo build` process.
@@ -600,7 +597,7 @@ impl<'a> BuildOutput<'a> {
     let mut found = None;
     for chunks in self.markers.chunks(2) {
       let (marker_before, _) = chunks[0];
-      let marker_after = chunks.get(1).map(|(id, tag)| *id);
+      let marker_after = chunks.get(1).map(|(id, _tag)| *id);
       if entry_id >= marker_before && (marker_after.is_none() || entry_id < marker_after.unwrap()) {
         found = Some((marker_before, marker_after));
         break;
@@ -633,6 +630,7 @@ impl<'a> BuildOutput<'a> {
     let mut num_prepared = 0;
     let mut recv = vec![];
 
+    #[allow(unused)]
     struct PreparedEntry<'a> {
       pub batch_id: usize,
       pub entry_id: usize,
@@ -668,7 +666,7 @@ impl<'a> BuildOutput<'a> {
               return 0;
             })
             .max();
-          for (batch_entry_id, (global_entry_id, entry)) in batch.into_iter().enumerate() {
+          for (_batch_entry_id, (global_entry_id, entry)) in batch.into_iter().enumerate() {
             let mut line = Line::default(); //format!("{} | {}", entry_id, entry.message().to_string());
             let mut margin = Span::default();
             let mut message = entry.message.clone();
@@ -820,10 +818,7 @@ pub enum BuildEvent {
 mod tests {
   use std::ops::Range;
 
-  use crate::{
-    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef,
-    Origin,
-  };
+  use crate::{BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef, Origin};
 
   use super::BuildOutput;
 

@@ -343,8 +343,8 @@ mod tests {
   use std::ops::Range;
 
   use crate::{
-    known_marker, must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef,
-    Origin, BUILD_MARKERS,
+    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef,
+    Origin,
   };
 
   use super::Markers;

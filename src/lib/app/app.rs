@@ -1,5 +1,5 @@
 use crate::{
-  BuildEntry, BuildEvent, BuildOutput, BuildTagKind, Debug, HelpMenu, LogView, Markers, Origin,
+  BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Markers, Origin,
   StatusBar,
 };
 
