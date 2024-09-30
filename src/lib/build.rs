@@ -295,6 +295,21 @@ impl BuildEntry {
     self.origin
   }
 
+  /// Checks if this entry has a [`BuildTagKind::Error`] attached to it.
+  pub fn is_error(&self) -> bool {
+    self.has_tag(BuildTagKind::Error)
+  }
+
+  /// Checks if this entry has a [`BuildTagKind::Warning`] attached to it.
+  pub fn is_warning(&self) -> bool {
+    self.has_tag(BuildTagKind::Warning)
+  }
+
+  /// Checks if this entry has a [`BuildTagKind::Warning`] attached to it.
+  pub fn is_note(&self) -> bool {
+    self.has_tag(BuildTagKind::Note)
+  }
+
   /// Define a [`BuildTag`]
   pub fn set_tag(&mut self, t: BuildTag) {
     if let Some(tag) = self.tag_mut(t.kind) {
@@ -443,6 +458,7 @@ pub struct BuildOutput<'a> {
   /// The raw unprocessed entries
   entries: Vec<BuildEntry>,
   warnings: Vec<usize>,
+  notes: Vec<usize>,
   errors: Vec<usize>,
   remove_noise: bool,
   cursor: usize,
@@ -455,6 +471,7 @@ impl<'a> Default for BuildOutput<'a> {
     Self {
       entries: Default::default(),
       warnings: Default::default(),
+      notes: Default::default(),
       errors: Default::default(),
       remove_noise: Default::default(),
       cursor: Default::default(),
@@ -699,6 +716,15 @@ impl<'a> BuildOutput<'a> {
             batch.len()
           );
           for entry in batch {
+            if let Some(_) = entry.entry.tag(BuildTagKind::Error) {
+              self.errors.push(entry.entry_id);
+            }
+            if let Some(_) = entry.entry.tag(BuildTagKind::Warning) {
+              self.warnings.push(entry.entry_id);
+            }
+            if let Some(_) = entry.entry.tag(BuildTagKind::Note) {
+              self.notes.push(entry.entry_id);
+            }
             self.entries[entry.entry_id] = entry.entry;
             self.prepared[entry.entry_id] = entry.display;
           }
@@ -752,6 +778,11 @@ impl<'a> BuildOutput<'a> {
   /// Retrieve the detected warnings
   pub fn warnings(&self) -> &Vec<usize> {
     &self.warnings
+  }
+
+  /// Retrieve the detected notes
+  pub fn notes(&self) -> &Vec<usize> {
+    &self.notes
   }
 
   /// Retrieve the preparation cursor.

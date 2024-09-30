@@ -13,6 +13,7 @@ pub struct StatusBar {
   event: Option<BuildEvent>,
   num_errors: usize,
   num_warnings: usize,
+  num_notes: usize,
   num_output_lines: usize,
   num_prepared_lines: usize,
 }
@@ -27,6 +28,12 @@ impl StatusBar {
   /// Set the number of errors
   pub fn with_num_errors(mut self, n: usize) -> Self {
     self.num_errors = n;
+    self
+  }
+
+  /// Set the number of notes
+  pub fn with_num_notes(mut self, n: usize) -> Self {
+    self.num_notes = n;
     self
   }
 
@@ -73,13 +80,18 @@ impl Widget for StatusBar {
           },
           " | ".into(),
           match self.num_errors {
-            0 => format!("{} error(s)", self.num_errors).dim(),
+            0 => "no errors".dim(),
             _ => format!("{} error(s)", self.num_errors).red(),
           },
           " | ".into(),
           match self.num_warnings {
-            0 => format!("{} warning(s)", self.num_warnings).dim(),
+            0 => "no warnings".dim(),
             _ => format!("{} warning(s)", self.num_warnings).yellow(),
+          },
+          " | ".into(),
+          match self.num_notes {
+            0 => "no notes".dim(),
+            _ => format!("{} error(s)", self.num_notes).blue(),
           },
           " | ".into(),
           match self.num_prepared_lines == self.num_output_lines {

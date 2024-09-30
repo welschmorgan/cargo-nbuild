@@ -242,7 +242,11 @@ fn render_loop(
       status_entry = Some(e);
     }
     // if first_render || output_changed || key_event {
-    let (num_errs, num_warns) = (build.errors().len(), build.warnings().len());
+    let (num_errs, num_warns, num_notes) = (
+      build.errors().len(),
+      build.warnings().len(),
+      build.notes().len(),
+    );
     terminal.draw(|frame| {
       [top_area, main_pane] =
         Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(frame.area());
@@ -272,6 +276,7 @@ fn render_loop(
           .with_event(*status)
           .with_num_prepared_lines(build.cursor())
           .with_num_output_lines(build.entries().len())
+          .with_num_notes(num_notes)
           .with_num_errors(num_errs)
           .with_num_warnings(num_warns);
         frame.render_widget(status_bar, status_area);
