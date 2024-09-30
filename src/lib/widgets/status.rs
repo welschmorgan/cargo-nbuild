@@ -91,7 +91,7 @@ impl Widget for StatusBar {
           " | ".into(),
           match self.num_notes {
             0 => "no notes".dim(),
-            _ => format!("{} error(s)", self.num_notes).blue(),
+            _ => format!("{} notes(s)", self.num_notes).blue(),
           },
           " | ".into(),
           match self.num_prepared_lines == self.num_output_lines {

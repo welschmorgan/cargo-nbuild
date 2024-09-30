@@ -262,9 +262,10 @@ fn render_loop(
         args.extend_from_slice(&["cargo".dim(), " ".into(), "build".dim()]);
       }
       args.extend(
-        std::env::args()
-          .skip(1)
-          .map(|arg| arg.into())
+        options
+          .build_args
+          .iter()
+          .flat_map(|arg| vec![" ".into(), arg.into()].into_iter())
           .collect::<Vec<_>>(),
       );
       let command = Paragraph::new(Line::default().spans(args)).block(Block::bordered());
