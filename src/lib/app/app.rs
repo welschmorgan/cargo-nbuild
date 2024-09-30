@@ -1,4 +1,7 @@
-use crate::{BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Origin, StatusBar};
+use crate::{
+  BuildEntry, BuildEvent, BuildOutput, BuildTagKind, Debug, HelpMenu, LogView, Markers, Origin,
+  StatusBar,
+};
 
 use std::{
   collections::VecDeque,
@@ -36,6 +39,8 @@ const HELP_MENU: &'static [(&'static str, &'static str)] = &[
   ("PageDn", "next output row"),
   ("Home", "go to the first output row"),
   ("End", "go to the last output row"),
+  ("Up", "go to the previous marker (error/warning/note)"),
+  ("Down", "go to the next marker (error/warning/note)"),
 ];
 
 /// Represent the application data
@@ -212,9 +217,7 @@ fn render_loop(
   build_output: Receiver<Vec<BuildEntry>>,
   build_events: Receiver<BuildEvent>,
 ) -> io::Result<()> {
-  let mut build = BuildOutput::default()
-    .with_noise_removed(false)/*
-    .with_update_threshold(Duration::from_millis(50)) */;
+  let mut build = BuildOutput::default().with_noise_removed(false);
   let mut vertical_scroll_state = ScrollbarState::default();
   let mut vertical_scroll: usize = 0;
   let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
@@ -224,10 +227,16 @@ fn render_loop(
   let mut status_area = Rect::default();
   let mut status_entry: Option<BuildEvent> = None;
   let mut show_help = false;
+  let mut markers = Markers::default();
+  let frame_area: Rect = terminal.get_frame().area();
   loop {
     build.pull(&build_output);
     // let output_changed = build.prepare();
     build.prepare();
+    *markers.tags_mut() = build.markers().tags().clone();
+    if let Some(selected) = markers.selected() {
+      build.markers_mut().select(selected);
+    }
     let build_lines = build.display();
     if let Ok(e) = build_events.try_recv() {
       status_entry = Some(e);
@@ -304,8 +313,10 @@ fn render_loop(
             }
             handle_key_press(
               key,
+              frame_area,
               &mut vertical_scroll,
               &mut vertical_scroll_state,
+              &mut markers,
               &log_area,
               &build_lines,
               &mut show_help,
@@ -319,11 +330,21 @@ fn render_loop(
   Ok(())
 }
 
+fn scroll_to_element(index: usize, scroll: &mut usize, log_area: &Rect) {
+  if index < *scroll {
+    *scroll = index.saturating_sub(log_area.height as usize);
+  } else if index >= *scroll + log_area.height as usize {
+    *scroll = index;
+  }
+}
+
 /// Handle user keypresses
 fn handle_key_press(
   key: KeyEvent,
+  frame_area: Rect,
   scroll: &mut usize,
   state: &mut ScrollbarState,
+  markers: &mut Markers,
   log_area: &Rect,
   build_lines: &Vec<Line<'_>>,
   show_help: &mut bool,
@@ -339,10 +360,33 @@ fn handle_key_press(
   } else if key.code == KeyCode::Char('h') {
     *show_help = !*show_help;
   } else if key.code == KeyCode::End {
-    *scroll = build_lines.len().saturating_sub(log_area.height as usize);
+    if !markers.is_empty() {
+      let marker_id = markers.select_last();
+      crate::dbg!(
+        "marker is now {:?}: {:?}: {:?}",
+        marker_id,
+        markers.selected_entry(),
+        markers
+      );
+      let entry_id = markers.selected_entry().unwrap_or_default();
+      scroll_to_element(entry_id, scroll, log_area);
+    } else {
+      *scroll = build_lines.len().saturating_sub(log_area.height as usize);
+    }
     *state = state.position(*scroll);
   } else if key.code == KeyCode::Home {
-    *scroll = 0;
+    if !markers.is_empty() {
+      let marker_id = markers.select_first();
+      crate::dbg!(
+        "marker is now {:?}: {:?}",
+        marker_id,
+        markers.selected_entry()
+      );
+      let entry_id = markers.selected_entry().unwrap_or_default();
+      scroll_to_element(entry_id, scroll, log_area);
+    } else {
+      *scroll = 0;
+    }
     *state = state.position(*scroll);
   } else if key.code == KeyCode::PageUp {
     *scroll = scroll.saturating_sub(log_area.height as usize);
@@ -350,6 +394,35 @@ fn handle_key_press(
   } else if key.code == KeyCode::PageDown {
     if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
       *scroll = scroll.saturating_add(log_area.height as usize);
+      *state = state.position(*scroll);
+    }
+  } else if key.code == KeyCode::Up {
+    let marker_id = markers.select_previous();
+    crate::dbg!(
+      "marker is now {:?}: {:?}",
+      marker_id,
+      markers.selected_entry()
+    );
+    let entry_id = markers.selected_entry().unwrap_or_default();
+    if entry_id < (*scroll + (frame_area.height as usize)) + 4
+    /* status bar is 1, top bar is 3 */
+    {
+      *scroll = entry_id;
+      *state = state.position(*scroll);
+    }
+  } else if key.code == KeyCode::Down {
+    let marker_id = markers.select_next();
+    crate::dbg!(
+      "marker is now {:?}: {:?}\n\t{:?}",
+      marker_id,
+      markers.selected_entry(),
+      markers
+    );
+    let entry_id = markers.selected_entry().unwrap_or_default();
+    if entry_id >= (*scroll + (frame_area.height as usize)) - 4
+    /* status bar is 1, top bar is 3 */
+    {
+      *scroll = entry_id;
       *state = state.position(*scroll);
     }
   }

@@ -1,5 +1,5 @@
 use ratatui::{
-  layout::{Constraint, Flex, Layout, Rect},
+  layout::{Alignment, Constraint, Flex, Layout, Rect},
   style::Stylize,
   text::Line,
   widgets::{Block, Clear, Paragraph, Widget},
@@ -33,7 +33,7 @@ impl Widget for HelpMenu {
   where
     Self: Sized,
   {
-    let area = popup_area(area, 60, 40);
+    let area = popup_area(area, 40, 80);
     Clear::default().render(area, buf);
     let mut help_col_widths = vec![0; 2];
     let mut final_help = vec![];
@@ -47,7 +47,11 @@ impl Widget for HelpMenu {
       final_help.push(Line::default().spans([key, " ".into(), desc]));
     }
     Paragraph::new(final_help)
-      .block(Block::bordered())
+      .block(
+        Block::bordered()
+          .title("Help menu")
+          .title_alignment(Alignment::Center),
+      )
       .centered()
       .on_black()
       .render(area, buf);

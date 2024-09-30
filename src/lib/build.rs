@@ -19,7 +19,7 @@ use ratatui::{
 };
 use regex::Regex;
 
-use crate::{dbg, Debug};
+use crate::{dbg, CapturedMarker, Debug, Marker, Markers, BUILD_MARKERS};
 
 /// Represent the `cargo build` process.
 pub struct BuildCommand(Child);
@@ -59,26 +59,10 @@ pub enum Origin {
   Stderr,
 }
 
-/// The markers that were captured if the [`BuildEntry::message`] matched.
-///
-/// See [`Marker`] for the declaration counter-part
-#[derive(Debug, Clone)]
-pub struct CapturedMarker {
-  /// The capture's range
-  pub range: Range<usize>,
-  /// The captured text
-  pub capture: String,
-}
-
-/// Represent a marker definition
-#[derive(Debug, Clone)]
-pub struct Marker {
-  /// The tag kind
-  pub tag: BuildTagKind,
-  /// The regex used to capture text
-  pub regex: Regex,
-  /// The final style applied to the marker
-  pub style: Style,
+impl Default for Origin {
+  fn default() -> Self {
+    Self::Stdout
+  }
 }
 
 /// Represent a source-code location. Captured from Cargo's output
@@ -107,7 +91,7 @@ pub enum BuildTagKind {
   Location,
 }
 
-impl Display for BuildTag {
+impl Display for BuildTagKind {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(f, "{:?}", self)
   }
@@ -122,40 +106,31 @@ pub struct BuildTag {
 }
 
 impl BuildTag {
-  /// Construct a warning marker tag
-  pub fn warning<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
+  /// Construct a marker tag
+  pub fn marker<C: AsRef<str>>(k: BuildTagKind, range: Range<usize>, capture: C) -> Self {
     Self {
-      kind: BuildTagKind::Warning,
+      kind: k,
       marker: Some(CapturedMarker {
         range,
         capture: capture.as_ref().to_string(),
       }),
       location: None,
     }
+  }
+
+  /// Construct a warning marker tag
+  pub fn warning<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
+    Self::marker(BuildTagKind::Warning, range, capture)
   }
 
   /// Construct a error marker tag
   pub fn error<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self {
-      kind: BuildTagKind::Error,
-      marker: Some(CapturedMarker {
-        range,
-        capture: capture.as_ref().to_string(),
-      }),
-      location: None,
-    }
+    Self::marker(BuildTagKind::Error, range, capture)
   }
 
   /// Construct a error marker tag
   pub fn note<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self {
-      kind: BuildTagKind::Note,
-      marker: Some(CapturedMarker {
-        range,
-        capture: capture.as_ref().to_string(),
-      }),
-      location: None,
-    }
+    Self::marker(BuildTagKind::Note, range, capture)
   }
 
   /// Construct a hidden tag
@@ -211,6 +186,11 @@ impl BuildEntry {
       origin: orig,
       tags: vec![],
     }
+  }
+
+  pub fn with_tags<I: IntoIterator<Item = BuildTag>>(mut self, tags: I) -> Self {
+    self.tags.extend(tags);
+    self
   }
 
   /// Retrieve the [`Instant`] this entry was created
@@ -307,6 +287,12 @@ impl BuildEntry {
   }
 }
 
+impl<S: AsRef<str>> From<S> for BuildEntry {
+  fn from(value: S) -> Self {
+    BuildEntry::new(value.as_ref(), Origin::default())
+  }
+}
+
 /// The BuildOutput struct prepares the [`BuildCommand`] raw output lines.
 /// It creates the necessary [`ratatui`] elements: [`Line`] and [`Span`]
 /// to be rendered later by the [`crate::widgets::log::LogView`] widget.
@@ -336,6 +322,7 @@ pub struct BuildOutput<'a> {
   remove_noise: bool,
   cursor: usize,
   prepared: Vec<Line<'a>>,
+  markers: Markers,
 }
 
 impl<'a> Default for BuildOutput<'a> {
@@ -345,30 +332,11 @@ impl<'a> Default for BuildOutput<'a> {
       warnings: Default::default(),
       errors: Default::default(),
       remove_noise: Default::default(),
-      cursor: 0,
-      prepared: vec![],
+      cursor: Default::default(),
+      prepared: Default::default(),
+      markers: Default::default(),
     }
   }
-}
-
-lazy_static! {
-  static ref BUILD_MARKERS: Arc<Vec<Marker>> = Arc::new(vec![
-    Marker {
-      tag: BuildTagKind::Error,
-      regex: Regex::new(r"error(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().red().bold(),
-    },
-    Marker {
-      tag: BuildTagKind::Note,
-      regex: Regex::new(r"note(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().blue().bold(),
-    },
-    Marker {
-      tag: BuildTagKind::Warning,
-      regex: Regex::new(r"warning(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().yellow().bold(),
-    },
-  ]);
 }
 
 impl<'a> BuildOutput<'a> {
@@ -460,22 +428,14 @@ impl<'a> BuildOutput<'a> {
     }
   }
 
-  /// Prepare markers of each [`BuildEntry`].
-  ///
-  /// Markers are messages that cargo emits like `^(warning|error|note):`
-  fn prepare_markers(entry: &mut BuildEntry) {
-    for known_marker in BUILD_MARKERS.iter() {
-      if let Some(m) = known_marker.regex.find(&entry.message()) {
-        entry.set_tag(BuildTag {
-          kind: known_marker.tag,
-          marker: Some(CapturedMarker {
-            range: m.range(),
-            capture: m.as_str().to_string(),
-          }),
-          location: None,
-        });
-      }
-    }
+  /// Retrieve the list of markers
+  pub fn markers(&self) -> &Markers {
+    &self.markers
+  }
+
+  /// Retrieve the list of markers as a mutable reference
+  pub fn markers_mut(&mut self) -> &mut Markers {
+    &mut self.markers
   }
 
   /// Prepare the entries that have not been processed yet
@@ -485,10 +445,18 @@ impl<'a> BuildOutput<'a> {
     let start_time = Instant::now();
     let mut num_prepared = 0;
     let mut recv = vec![];
+
+    struct PreparedEntry<'a> {
+      batch_id: usize,
+      entry_id: usize,
+      entry: BuildEntry,
+      display: Line<'a>,
+    }
+
     if let Some(batches) = self.batch_unprepared_entries() {
       for (batch_id, mut batch) in batches {
         num_prepared += batch.len();
-        let (tx, rx) = channel::<(usize, Vec<(usize, Line<'_>)>)>();
+        let (tx, rx) = channel::<(usize, Vec<PreparedEntry<'_>>)>();
         recv.push(rx);
         let style_log = Style::default().dim();
         threads.push(spawn(move || {
@@ -499,7 +467,7 @@ impl<'a> BuildOutput<'a> {
           ));
           let mut ret = vec![];
           for (_, entry) in &mut batch {
-            Self::prepare_markers(entry);
+            Markers::prepare(entry);
           }
           let margin_width = batch
             .iter()
@@ -517,6 +485,7 @@ impl<'a> BuildOutput<'a> {
             let mut found_marker = false;
             for known_marker in BUILD_MARKERS.iter() {
               if let Some(tag) = entry.tag(known_marker.tag) {
+                dbg!("entry #{} is a marker: {}", entry_id, tag.kind);
                 let captured = tag.marker.as_ref().unwrap();
                 margin = margin.content(captured.capture.clone());
                 margin = margin.style(known_marker.style);
@@ -532,9 +501,14 @@ impl<'a> BuildOutput<'a> {
             line.push_span(margin);
             line.push_span(" ");
             line.push_span(message);
-            ret.push((entry_id, line));
+            ret.push(PreparedEntry {
+              batch_id,
+              entry_id: entry_id,
+              entry: entry,
+              display: line,
+            });
           }
-          tx.send((batch_id, ret))
+          let _ = tx.send((batch_id, ret));
         }));
       }
       for th in threads {
@@ -552,22 +526,31 @@ impl<'a> BuildOutput<'a> {
             batch_id,
             batch.len()
           );
-          for (id, entry) in batch {
-            self.prepared[id] = entry;
+          for entry in batch {
+            self.entries[entry.entry_id] = entry.entry;
+            self.prepared[entry.entry_id] = entry.display;
           }
         }
       }
+      *self.markers.tags_mut() = Markers::from(self.entries.as_slice()).tags().clone();
       dbg!(
-        "prepare_mt: done preparing {} entries in {}s",
+        "prepare_mt: done preparing {} entries in {}s (selected marker: {:?})",
         num_prepared,
-        (Instant::now() - start_time).as_secs_f32()
+        (Instant::now() - start_time).as_secs_f32(),
+        self.markers.selected()
       );
     }
   }
 
   /// Retrieve the displayable lines
   pub fn display(&self) -> Vec<Line<'_>> {
-    return self.prepared.clone();
+    let mut ret = self.prepared.clone();
+    if let Some(sel_entry_id) = self.markers.selected_entry() {
+      ret[sel_entry_id].style = ret[sel_entry_id]
+        .style
+        .patch(Style::default().on_light_blue());
+    }
+    ret
   }
 
   /// Retrieve the stored entries
