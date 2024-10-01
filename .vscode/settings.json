@@ -1,0 +1,5 @@
+{
+  "logViewer.watch": [
+    ".cargo-nbuild.log"
+  ]
+}

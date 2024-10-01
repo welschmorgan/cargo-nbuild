@@ -110,13 +110,30 @@ impl<'a> MarkerRef<'a> {
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MarkerSelection {
+  pub marker_id: usize,
+  pub entry_id: usize,
+  pub region: Option<Range<usize>>,
+}
+
+impl MarkerSelection {
+  pub fn new(marker_id: usize, entry_id: usize, text_selected: Option<Range<usize>>) -> Self {
+    Self {
+      marker_id,
+      entry_id,
+      region: text_selected,
+    }
+  }
+}
+
 /// Represent a list of markers extracted from [`BuildEntry`] tags
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Markers {
   /// The list of tags as a list of `(entry_id, marker_kind)` tuples
   tags: Vec<(usize, BuildTagKind)>,
   /// The currently selected marker, which corresponds to an item in the [`Markers::tags`] list
-  selected: Option<usize>,
+  selection: Option<MarkerSelection>,
 }
 
 impl Markers {
@@ -124,7 +141,7 @@ impl Markers {
   pub fn new() -> Self {
     Self {
       tags: Vec::new(),
-      selected: None,
+      selection: None,
     }
   }
 
@@ -140,25 +157,25 @@ impl Markers {
 
   /// Retrieve the currently selected marker.
   /// The value coresponds to an entry in the [`Markers::tags`] vector
-  pub fn selected(&self) -> Option<usize> {
-    self.selected
+  pub fn selection(&self) -> Option<&MarkerSelection> {
+    self.selection.as_ref()
   }
 
   /// Retrieve the currently selected marker as a mutable ref.
   /// The value coresponds to an entry in the [`Markers::tags`] vector
-  pub fn selected_mut(&mut self) -> &mut Option<usize> {
-    &mut self.selected
+  pub fn selection_mut(&mut self) -> &mut Option<MarkerSelection> {
+    &mut self.selection
   }
 
   /// Retrieve the currently selected entry.
   pub fn selected_entry(&self) -> Option<usize> {
-    if let Some(selected) = self.selected {
+    if let Some(selected) = &self.selection {
       return self
         .tags
         .iter()
         .enumerate()
         .find_map(|(marker_id, (entry_id, _tag))| {
-          if marker_id == selected {
+          if marker_id == selected.marker_id {
             return Some(entry_id);
           }
           None
@@ -170,13 +187,13 @@ impl Markers {
 
   /// Retrieve the [`BuildTagKind`] of the currently selected marker
   pub fn selected_kind(&self) -> Option<BuildTagKind> {
-    if let Some(selected) = self.selected {
+    if let Some(selected) = &self.selection {
       return self
         .tags
         .iter()
         .enumerate()
         .find_map(|(marker_id, (_entry_id, tag))| {
-          if marker_id == selected {
+          if marker_id == selected.marker_id {
             return Some(tag);
           }
           None
@@ -212,18 +229,18 @@ impl Markers {
   }
 
   /// Select a specific marker
-  pub fn select(&mut self, mut id: usize) {
+  pub fn select(&mut self, mut id: usize, text: Option<Range<usize>>) {
     if self.tags.is_empty() {
-      self.selected = None;
+      self.selection = None;
     } else {
       id = id.min(self.tags.len().saturating_sub(1));
-      self.selected = Some(id);
+      self.selection = Some(MarkerSelection::new(id, self.tags[id].0, text));
     }
   }
 
   /// Unselect marker
   pub fn unselect(&mut self) {
-    self.selected = None;
+    self.selection = None;
   }
 
   /// Retrieve the marker before the one currently selected.
@@ -231,11 +248,24 @@ impl Markers {
   /// If no markers were previously selected, it selects the first marker.
   /// If the currently selected marker is the first one, it selects the first marker again.
   /// Otherwise it just decrements the currently selected marker.
-  pub fn previous_selected(&self) -> Option<usize> {
-    match self.selected {
-      Some(cur) => Some(cur.saturating_sub(1)),
-      None => Some(0),
-    }
+  pub fn previous_selection(&self) -> Option<MarkerSelection> {
+    let prev_marker = match self.tags.is_empty() {
+      true => return None,
+      false => match self.selection.as_ref() {
+        Some(cur) => cur.marker_id.saturating_sub(1),
+        None => 0,
+      },
+    };
+    let entry_id = self
+      .tags
+      .get(prev_marker)
+      .map(|tag| tag.0)
+      .unwrap_or_default();
+    Some(MarkerSelection {
+      marker_id: prev_marker,
+      entry_id,
+      ..Default::default()
+    })
   }
 
   /// Retrieve the marker after the one currently selected.
@@ -243,17 +273,40 @@ impl Markers {
   /// If no markers were previously selected, it selects the first marker.
   /// If the currently selected marker is the last one, it selects the last marker again.
   /// Otherwise it just increments the currently selected marker.
-  pub fn next_selected(&self) -> Option<usize> {
-    match self.selected {
-      Some(cur) => {
-        if self.tags.len() > 1 && cur < self.tags.len() - 1 {
-          Some(cur.saturating_add(1))
-        } else {
-          Some(cur)
+  pub fn next_selection(&self) -> Option<MarkerSelection> {
+    let prev_marker = match self.tags.is_empty() {
+      true => return None,
+      false => match self.selection.as_ref() {
+        Some(cur) => {
+          if cur.marker_id < self.tags.len().saturating_sub(1) {
+            cur.marker_id.saturating_add(1)
+          } else {
+            self.tags.len().saturating_sub(1)
+          }
         }
-      }
-      None => Some(0),
-    }
+        None => 0,
+      },
+    };
+    let entry_id = self
+      .tags
+      .get(prev_marker)
+      .map(|tag| tag.0)
+      .unwrap_or_default();
+    Some(MarkerSelection {
+      marker_id: prev_marker,
+      entry_id,
+      ..Default::default()
+    })
+  }
+
+  /// Retrieve the marker before the one currently selected.
+  ///
+  /// If no markers were previously selected, it selects the first marker.
+  /// If the currently selected marker is the first one, it selects the first marker again.
+  /// Otherwise it just decrements the currently selected marker.
+  pub fn select_previous(&mut self) -> Option<&MarkerSelection> {
+    self.selection = self.previous_selection();
+    self.selection.as_ref()
   }
 
   /// Retrieve the marker after the one currently selected.
@@ -261,31 +314,21 @@ impl Markers {
   /// If no markers were previously selected, it selects the first marker.
   /// If the currently selected marker is the last one, it selects the last marker again.
   /// Otherwise it just increments the currently selected marker.
-  pub fn select_next(&mut self) -> usize {
-    self.selected = self.next_selected();
-    self.selected.unwrap()
-  }
-
-  /// Select the last marker
-  pub fn select_last(&mut self) -> Option<usize> {
-    self.select(self.tags.len());
-    self.selected
+  pub fn select_next(&mut self) -> Option<&MarkerSelection> {
+    self.selection = self.next_selection();
+    self.selection.as_ref()
   }
 
   /// Select the first marker
-  pub fn select_first(&mut self) -> Option<usize> {
-    self.select(0);
-    self.selected
+  pub fn select_first(&mut self) -> Option<&MarkerSelection> {
+    self.select(0, None);
+    self.selection.as_ref()
   }
 
-  /// Retrieve the marker before the one currently selected.
-  ///
-  /// If no markers were previously selected, it selects the first marker.
-  /// If the currently selected marker is the first one, it selects the first marker again.
-  /// Otherwise it just decrements the currently selected marker.
-  pub fn select_previous(&mut self) -> usize {
-    self.selected = self.previous_selected();
-    self.selected.unwrap()
+  /// Select the last marker
+  pub fn select_last(&mut self) -> Option<&MarkerSelection> {
+    self.select(self.tags.len(), None);
+    self.selection.as_ref()
   }
 }
 
@@ -318,7 +361,7 @@ impl From<&[BuildEntry]> for Markers {
         // .inspect(|(id, entry)| crate::dbg!(format!("entry #{}: {:?}", id, entry.tags())))
         .filter_map(|(id, entry)| entry.marker().map(|marker| (id, marker.kind())))
         .collect::<Vec<_>>(),
-      selected: None,
+      selection: None,
     }
   }
 }
@@ -333,7 +376,7 @@ impl Default for Markers {
   fn default() -> Self {
     Self {
       tags: Default::default(),
-      selected: Default::default(),
+      selection: Default::default(),
     }
   }
 }
@@ -343,7 +386,8 @@ mod tests {
   use std::ops::Range;
 
   use crate::{
-    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef, Origin,
+    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef,
+    MarkerSelection, Origin,
   };
 
   use super::Markers;
@@ -403,7 +447,7 @@ mod tests {
       markers,
       Markers {
         tags: vec![(0, BuildTagKind::Error)],
-        selected: None
+        selection: None
       }
     )
   }
@@ -418,8 +462,8 @@ mod tests {
         .with_tags([BuildTag::warning(Range { start: 0, end: 7 }, "warning:")]),
     ];
     let mut markers = Markers::from(&entries);
-    markers.select(1);
-    assert_eq!(markers.selected, Some(1));
+    markers.select(1, None);
+    assert_eq!(markers.selection, Some(MarkerSelection::new(1, 3, None)));
     assert_eq!(markers.selected_entry(), Some(2));
     assert_eq!(markers.selected_kind(), Some(BuildTagKind::Warning));
   }
@@ -449,11 +493,20 @@ mod tests {
     ];
     let mut markers = Markers::from(&entries);
     // first time goes from None -> Some(0)
-    assert_eq!(markers.select_next(), 0);
+    assert_eq!(
+      markers.select_next(),
+      Some(&MarkerSelection::new(0, 0, None))
+    );
     // second time goes from Some(0) -> Some(1)
-    assert_eq!(markers.select_next(), 1);
+    assert_eq!(
+      markers.select_next(),
+      Some(&MarkerSelection::new(1, 3, None))
+    );
     // third time goes from Some(1) -> Some(1) as it is out-of-bounds
-    assert_eq!(markers.select_next(), 1);
+    assert_eq!(
+      markers.select_next(),
+      Some(&MarkerSelection::new(1, 3, None))
+    );
   }
 
   #[test]
@@ -467,8 +520,14 @@ mod tests {
     ];
     let mut markers = Markers::from(&entries);
     // first time goes from None -> Some(0)
-    assert_eq!(markers.select_previous(), 0);
+    assert_eq!(
+      markers.select_previous(),
+      Some(&MarkerSelection::new(0, 0, None))
+    );
     // second time goes from Some(0) -> Some(0)
-    assert_eq!(markers.select_previous(), 0);
+    assert_eq!(
+      markers.select_previous(),
+      Some(&MarkerSelection::new(0, 0, None))
+    );
   }
 }

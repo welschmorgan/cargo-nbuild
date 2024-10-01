@@ -1,4 +1,4 @@
-use std::{borrow::Cow, process::ExitStatus};
+use std::{borrow::Cow, fmt::Display, process::ExitStatus};
 
 use ratatui::{
   style::{Style, Stylize},
@@ -69,12 +69,15 @@ impl StatusMessage {
       .collect::<Vec<_>>();
     let mut parts = [StatusPart::default(); STATUS_MSG_PARTS];
     let mut len = 0;
-    for i in 0..byte_parts.len() {
-      if i >= STATUS_MSG_PARTS {
-        break;
+    if !byte_parts.is_empty() {
+      for i in 0..byte_parts.len() {
+        if i >= STATUS_MSG_PARTS {
+          break;
+        }
+        parts[i] = byte_parts[i];
+        len = i;
       }
-      parts[i] = byte_parts[i];
-      len = i;
+      len += 1;
     }
     Self { parts, len }
   }
@@ -113,6 +116,23 @@ impl Default for StatusMessage {
       parts: [StatusPart::default(); STATUS_MSG_PARTS],
       len: 0,
     }
+  }
+}
+
+impl Display for StatusMessage {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let parts = self.parts[0..self.len]
+      .iter()
+      .map(|part| unsafe { std::str::from_utf8_unchecked(&part.0[0..part.1]) })
+      .collect::<Vec<_>>();
+    write!(
+      f,
+      "StatusMessage([{}])",
+      match parts.len() {
+        0 => String::new(),
+        _ => format!("\"{}\"", parts.join("\", \"")),
+      }
+    )
   }
 }
 

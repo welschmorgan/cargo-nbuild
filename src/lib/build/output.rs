@@ -13,7 +13,7 @@ use ratatui::{
   text::{Line, Span},
 };
 
-use crate::{BuildTagKind, Debug, Markers, TryLockFor};
+use crate::{BuildTagKind, Debug, MarkerSelection, Markers, TryLockFor};
 
 use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 
@@ -200,11 +200,30 @@ impl<'a> BuildOutput<'a> {
 
   pub fn block_at(&'a self, entry_id: usize) -> Option<MarkedBlock<'a>> {
     if let Some(range) = self.block_range_at(entry_id) {
+      let marker_id = *self
+        .markers
+        .iter()
+        .enumerate()
+        .find_map(|(marker_id, (entry_id, tag))| {
+          if *entry_id == range.start {
+            return Some(marker_id);
+          }
+          None
+        })
+        .as_ref()
+        .expect("block found with no coresponding marker");
       let marker = self.entries[range.start].marker().unwrap();
       let entries = self.entries[range.start..range.end]
         .iter()
         .collect::<Vec<_>>();
-      return Some(MarkedBlock::new(marker, range, entries));
+      return Some(MarkedBlock::new(marker_id, marker, range, entries));
+    }
+    None
+  }
+
+  pub fn block_size(&'a self, entry_id: usize) -> Option<usize> {
+    if let Some(block) = self.block_at(entry_id) {
+      return Some(block.entries().len());
     }
     None
   }
@@ -303,8 +322,8 @@ impl<'a> BuildOutput<'a> {
           for entry in batch {
             if let Some(_) = entry.entry.tag(BuildTagKind::Error) {
               let _ = tx_build_events.send(BuildEvent::BuildError(entry.entry_id));
-              if self.markers.selected().is_none() {
-                self.markers.select(entry.entry_id);
+              if self.markers.selection().is_none() {
+                self.markers.select(entry.entry_id, None);
                 crate::dbg!("Auto-selecting entry # {}", entry.entry_id);
               }
               self.errors.push(entry.entry_id);
@@ -339,7 +358,7 @@ impl<'a> BuildOutput<'a> {
         "prepare_mt: done preparing {} entries in {}s (selected marker: {:?})",
         num_prepared,
         (Instant::now() - start_time).as_secs_f32(),
-        self.markers.selected()
+        self.markers.selection()
       );
     }
   }
@@ -382,6 +401,24 @@ impl<'a> BuildOutput<'a> {
   pub fn cursor(&self) -> usize {
     self.cursor
   }
+
+  pub fn search<Q: AsRef<str>>(&self, query: Q) -> Option<(MarkedBlock, MarkerSelection)> {
+    self
+      .entries
+      .iter()
+      .enumerate()
+      .find_map(|(entry_id, entry)| {
+        if let Some(pos) = entry.message().find(query.as_ref()) {
+          let block = self.block_at(entry_id).unwrap();
+          let marker_id = block.range().start;
+          return Some((
+            block,
+            MarkerSelection::new(marker_id, entry_id, Some(pos..pos + query.as_ref().len())),
+          ));
+        }
+        None
+      })
+  }
 }
 
 impl<'a, T: Into<BuildEntry>, I: IntoIterator<Item = T>> From<I> for BuildOutput<'a> {
@@ -399,7 +436,7 @@ impl<'a, T: Into<BuildEntry>, I: IntoIterator<Item = T>> From<I> for BuildOutput
 
 #[cfg(test)]
 mod tests {
-  use std::ops::Range;
+  use std::{ops::Range, sync::mpsc::channel};
 
   use crate::{BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef, Origin};
 
@@ -417,7 +454,8 @@ mod tests {
     |
     = note: `#[warn(dead_code)]` on by default"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    build.prepare();
+    let (tx_events, rx_events) = channel();
+    build.prepare(tx_events);
     let unprepared = build.entries();
     let lines = build.display();
     assert_eq!(unprepared.len(), lines.len());

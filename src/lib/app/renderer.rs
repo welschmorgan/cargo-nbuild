@@ -2,7 +2,7 @@ use std::{
   cell::RefCell,
   io::{self, stdout},
   rc::Rc,
-  sync::mpsc::{Receiver, Sender},
+  sync::mpsc::{channel, Receiver, Sender},
   time::Duration,
 };
 
@@ -11,14 +11,17 @@ use ratatui::{
     event::{self, DisableMouseCapture, KeyCode, KeyEvent, KeyEventKind, MouseEventKind},
     execute,
   },
-  layout::{Constraint, Layout, Rect},
-  style::Stylize,
+  layout::{Constraint, Layout, Position, Rect},
+  style::{Style, Stylize},
   text::Line,
   widgets::{Block, Paragraph, ScrollbarState},
   DefaultTerminal,
 };
 
-use crate::{BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Markers, StatusBar};
+use crate::{
+  BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, MarkedBlock, MarkerSelection,
+  Markers, SearchBar, SearchState, StatusBar, StatusMessage,
+};
 
 use super::AppOptions;
 
@@ -81,6 +84,21 @@ impl Renderer {
     Debug::log("render thread stopped");
   }
 
+  fn set_cursor_visible(terminal: &mut DefaultTerminal, v: bool) {
+    if v {
+      if let Err(e) = terminal.show_cursor() {
+        crate::dbg!("failed to show cursor: {}", e);
+      }
+    } else {
+      if let Err(e) = terminal.set_cursor_position((0, 0)) {
+        crate::dbg!("failed to set cursor position: {}", e);
+      }
+      if let Err(e) = terminal.hide_cursor() {
+        crate::dbg!("failed to hide cursor: {}", e);
+      }
+    }
+  }
+
   /// The rendering loop
   fn render_loop(
     options: AppOptions,
@@ -97,24 +115,56 @@ impl Renderer {
     let mut main_pane = Rect::default();
     let mut shortcuts_area = Rect::default();
     let mut top_area = Rect::default();
+    let mut bottom_area = Rect::default();
+    let mut search_area = Rect::default();
     let mut status_area = Rect::default();
-    let mut status_entry: Option<BuildEvent> = None;
+    let mut status_entry: Option<StatusMessage> = None;
+    let mut build_status_entry: Option<BuildEvent> = None;
     let mut show_help = false;
     let mut markers = Markers::default();
     let frame_area: Rect = terminal.get_frame().area();
     let status_bar = Rc::new(RefCell::new(StatusBar::default()));
-    loop {
+    let mut search_state: Option<SearchState> = None;
+    let (tx_search_query, rx_search_query) = channel::<String>();
+    let mut last_search_result: Option<(MarkedBlock<'_>, MarkerSelection)> = None;
+    let mut stop = false;
+    while !stop {
       build.pull(&build_output);
-      // let output_changed = build.prepare();
       build.prepare(tx_build_events.clone());
       *markers.tags_mut() = build.markers().tags().clone();
-      if let Some(selected) = markers.selected() {
-        build.markers_mut().select(selected);
+      if let Ok(query) = rx_search_query.try_recv() {
+        crate::dbg!("Searching for '{}'", query);
+        if let Some((block, selection)) = build.search(&query) {
+          crate::dbg!(
+            "Found in block #{} -> {:?}\n{}",
+            block.marker_id(),
+            selection,
+            block
+              .lines()
+              .iter()
+              .map(|line| format!("  | {}", line))
+              .collect::<Vec<_>>()
+              .join("\n")
+          );
+          last_search_result = Some((block.clone(), selection.clone()));
+          *markers.selection_mut() = Some(selection);
+          search_state = None;
+          status_entry = Some(StatusMessage::new([(
+            format!("Show search result {}/{}", block.marker_id(), markers.len()),
+            Style::default(),
+          )]));
+        } else {
+          status_entry = Some(StatusMessage::new([
+            (" ✗ ".to_string(), Style::default().bold().red()),
+            (format!("'{}' not found", query), Style::default()),
+          ]))
+        }
       }
+      *build.markers_mut().selection_mut() = markers.selection().cloned();
       let build_lines = build.display();
       if let Ok(e) = build_events.try_recv() {
         crate::dbg!("Received {:?}", e);
-        status_entry = Some(e);
+        build_status_entry = Some(e);
       }
       // if first_render || output_changed || key_event {
       let (num_errs, num_warns, num_notes) = (
@@ -122,13 +172,22 @@ impl Renderer {
         build.warnings().len(),
         build.notes().len(),
       );
+      Self::set_cursor_visible(&mut terminal, search_state.is_some());
       terminal.draw(|frame| {
         [top_area, main_pane] =
           Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(frame.area());
         [command_area, shortcuts_area] =
           Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(top_area);
-        [log_area, status_area] =
+        [log_area, bottom_area] =
           Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(main_pane);
+        [search_area, status_area] = match search_state {
+          Some(_) => {
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(bottom_area)
+          }
+          None => {
+            Layout::horizontal([Constraint::Length(0), Constraint::Fill(1)]).areas(bottom_area)
+          }
+        };
 
         let mut args = vec!["cmd".bold(), ":".into(), " ".into()];
         if options.stdin {
@@ -147,15 +206,30 @@ impl Renderer {
         let shortcuts =
           Paragraph::new(Line::default().spans(["H: Show help"])).block(Block::bordered());
 
-        if let Some(status) = status_entry.as_ref() {
-          let new_status = (*status_bar.borrow())
-            .with_event(*status)
+        if status_entry.is_some() || build_status_entry.is_some() {
+          let mut new_status = *status_bar.borrow();
+          match (status_entry.as_ref(), build_status_entry.as_ref()) {
+            (Some(status_msg), Some(build_event)) => {
+              new_status = new_status
+                .with_event(*build_event)
+                .with_message(*status_msg);
+            }
+            (Some(status_msg), None) => {
+              new_status = new_status.with_message(*status_msg);
+            }
+            (None, Some(build_event)) => {
+              new_status = new_status.with_event(*build_event);
+            }
+            (None, None) => {}
+          }
+          *status_bar.borrow_mut() = new_status
             .with_num_prepared_lines(build.cursor())
             .with_num_output_lines(build.entries().len())
             .with_num_notes(num_notes)
             .with_num_errors(num_errs)
             .with_num_warnings(num_warns);
-          *status_bar.borrow_mut() = new_status;
+          status_entry = None;
+          build_status_entry = None;
         }
         frame.render_widget(*status_bar.borrow(), status_area);
         let log_view = LogView::default()
@@ -165,6 +239,14 @@ impl Renderer {
         // frame.render_stateful_widget(log_view, log_area, &mut list_state);
         frame.render_widget(shortcuts, shortcuts_area);
         frame.render_widget(command, command_area);
+        if search_state.is_some() {
+          frame.render_stateful_widget(SearchBar, search_area, &mut search_state);
+          let mut cursor_pos = (search_area.x, search_area.y);
+          if let Some(state) = search_state.as_ref() {
+            cursor_pos.0 += state.cursor_position() as u16;
+          }
+          frame.set_cursor_position(cursor_pos);
+        }
         if show_help {
           let help = HelpMenu::new().with_keys(HELP_MENU);
           frame.render_widget(help, frame.area());
@@ -187,20 +269,18 @@ impl Renderer {
           },
           event::Event::Key(key) => {
             if key.kind == KeyEventKind::Press {
-              if key.code == KeyCode::Char('q') {
-                if let Err(e) = user_quit.send(true) {
-                  Debug::log(format!("failed to quit app, {}", e));
-                }
-                break;
-              }
               Self::handle_key_press(
                 key,
-                frame_area,
                 &mut vertical_scroll,
                 &mut vertical_scroll_state,
                 &mut markers,
+                &mut stop,
+                user_quit.clone(),
                 &log_area,
+                &build,
                 &build_lines,
+                &mut search_state,
+                tx_search_query.clone(),
                 &mut show_help,
               );
             }
@@ -223,15 +303,27 @@ impl Renderer {
   /// Handle user keypresses
   fn handle_key_press(
     key: KeyEvent,
-    frame_area: Rect,
     scroll: &mut usize,
     state: &mut ScrollbarState,
     markers: &mut Markers,
+    stop: &mut bool,
+    user_quit: Sender<bool>,
     log_area: &Rect,
+    build_output: &BuildOutput,
     build_lines: &Vec<Line<'_>>,
+    search_value: &mut Option<SearchState>,
+    search_query: Sender<String>,
     show_help: &mut bool,
   ) {
-    if key.code == KeyCode::Char('j') {
+    if SearchBar::handle_key(key, search_value, search_query) {
+      return;
+    }
+    if key.code == KeyCode::Char('q') {
+      if let Err(e) = user_quit.send(true) {
+        Debug::log(format!("failed to quit app, {}", e));
+      }
+      *stop = true;
+    } else if key.code == KeyCode::Char('j') {
       if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
         *scroll = scroll.saturating_add(1);
         *state = state.position(*scroll);
@@ -244,7 +336,7 @@ impl Renderer {
     } else if key.code == KeyCode::End {
       crate::dbg!("goto end");
       if !markers.is_empty() {
-        let marker_id = markers.select_last();
+        let marker_id = markers.select_last().cloned();
         crate::dbg!(
           "marker is now {:?}: {:?}: {:?}",
           marker_id,
@@ -261,7 +353,7 @@ impl Renderer {
     } else if key.code == KeyCode::Home {
       crate::dbg!("goto beginning");
       if !markers.is_empty() {
-        let marker_id = markers.select_first();
+        let marker_id = markers.select_first().cloned();
         crate::dbg!(
           "marker is now {:?}: {:?}",
           marker_id,
@@ -283,32 +375,50 @@ impl Renderer {
         *state = state.position(*scroll);
       }
     } else if key.code == KeyCode::Up {
-      if markers.is_empty() {
-        *scroll = scroll.saturating_sub(1);
-        *state = state.position(*scroll);
-      } else {
-        let _ = markers.select_previous();
-        let entry_id = markers.selected_entry().unwrap_or_default();
-        if entry_id < (*scroll + (frame_area.height as usize)) + 4
-        /* status bar is 1, top bar is 3 */
-        {
-          *scroll = entry_id;
-          *state = state.position(*scroll);
-        }
+      if let Some(previous) = markers.previous_selection() {
+        Self::select_marker(
+          build_output.block_size(previous.entry_id).unwrap(),
+          &previous,
+          markers,
+          scroll,
+          state,
+          log_area,
+        );
       }
     } else if key.code == KeyCode::Down {
-      if markers.is_empty() {
-        *scroll = scroll.saturating_add(1);
+      if let Some(next) = markers.next_selection() {
+        Self::select_marker(
+          build_output.block_size(next.marker_id).unwrap(),
+          &next,
+          markers,
+          scroll,
+          state,
+          log_area,
+        );
+      }
+    }
+  }
+
+  fn select_marker(
+    block_size: usize,
+    selection: &MarkerSelection,
+    markers: &mut Markers,
+    scroll: &mut usize,
+    state: &mut ScrollbarState,
+    log_area: &Rect,
+  ) {
+    if markers.is_empty() {
+      *scroll = selection.entry_id;
+      *state = state.position(*scroll);
+    } else {
+      markers.select(selection.marker_id, selection.region.clone());
+      let entry_id = markers.selected_entry().unwrap_or_default();
+      if entry_id >= *scroll + (log_area.height as usize) {
+        *scroll = entry_id;
         *state = state.position(*scroll);
-      } else {
-        let _ = markers.select_next();
-        let entry_id = markers.selected_entry().unwrap_or_default();
-        if entry_id >= (*scroll + (frame_area.height as usize)) - 4
-        /* status bar is 1, top bar is 3 */
-        {
-          *scroll = entry_id;
-          *state = state.position(*scroll);
-        }
+      } else if entry_id < *scroll {
+        *scroll = scroll.saturating_sub(log_area.height as usize);
+        *state = state.position(*scroll);
       }
     }
   }
