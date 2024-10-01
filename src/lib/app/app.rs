@@ -1,6 +1,5 @@
 use crate::{
-  BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Markers, Origin,
-  StatusBar,
+  dbg, BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Markers, Origin, StatusBar,
 };
 
 use std::{
@@ -95,7 +94,7 @@ impl App {
       }),
       // build
       spawn(move || match build_options.stdin {
-        true => scan_stdin(tx_build_output, tx_build_events),
+        true => scanner(Origin::Stdin, tx_build_output, tx_build_events),
         false => build(build_options, tx_build_output, tx_build_events),
       }),
     ]);
@@ -112,28 +111,35 @@ impl App {
   }
 }
 
+const THREADED_SCANNER: bool = false;
+
 /// The stdin scanner thread
-fn scan_stdin(build_output: Sender<Vec<BuildEntry>>, build_events: Sender<BuildEvent>) {
-  Debug::log("scan thread started");
+fn scanner(
+  origin: Origin,
+  build_output: Sender<Vec<BuildEntry>>,
+  build_events: Sender<BuildEvent>,
+) {
+  crate::dbg!("scan thread started on {:?}", origin);
   let _ = build_events.send(BuildEvent::BuildStarted);
   Debug::log("spawned cargo process");
   let buf = BufReader::new(stdin());
   let events = build_output.clone();
-  let thread = spawn(move || {
-    let entries = buf
-      .lines()
-      .map(|line| {
-        let line = line.expect("invalid output line");
-        Debug::log(format!("[stdin] {}", line));
-        BuildEntry::new(line, Origin::Stdout)
-      })
-      .collect::<Vec<_>>();
-    let _ = events.send(entries);
-  });
-  // Debug::log("Waiting for stdout/err threads");
-  thread.join().expect("failed to join process reader thread");
-  // Debug::log("Done waiting for stdout/err threads");
-
+  let f = move || {
+    for line in buf.lines() {
+      let line = line.expect("invalid input line").replace("\x00", "");
+      crate::dbg!("[stdin] {}", line);
+      let _ = events.send(vec![BuildEntry::new(line, origin)]);
+    }
+  };
+  if THREADED_SCANNER {
+    let thread = spawn(f);
+    Debug::log("Waiting for scanner thread");
+    thread
+      .join()
+      .expect("failed to join process scanner thread");
+  } else {
+    f();
+  }
   let exit_status = ExitStatus::default();
   let _ = build_events.send(BuildEvent::BuildFinished(exit_status));
   Debug::log(format!("Exit status: {}", exit_status));
@@ -366,6 +372,7 @@ fn handle_key_press(
   } else if key.code == KeyCode::Char('h') {
     *show_help = !*show_help;
   } else if key.code == KeyCode::End {
+    crate::dbg!("goto end");
     if !markers.is_empty() {
       let marker_id = markers.select_last();
       crate::dbg!(
@@ -379,8 +386,10 @@ fn handle_key_press(
     } else {
       *scroll = build_lines.len().saturating_sub(log_area.height as usize);
     }
+    crate::dbg!("scroll to line {}", *scroll);
     *state = state.position(*scroll);
   } else if key.code == KeyCode::Home {
+    crate::dbg!("goto beginning");
     if !markers.is_empty() {
       let marker_id = markers.select_first();
       crate::dbg!(
@@ -393,6 +402,7 @@ fn handle_key_press(
     } else {
       *scroll = 0;
     }
+    crate::dbg!("scroll to line {}", *scroll);
     *state = state.position(*scroll);
   } else if key.code == KeyCode::PageUp {
     *scroll = scroll.saturating_sub(log_area.height as usize);
@@ -403,33 +413,32 @@ fn handle_key_press(
       *state = state.position(*scroll);
     }
   } else if key.code == KeyCode::Up {
-    let marker_id = markers.select_previous();
-    crate::dbg!(
-      "marker is now {:?}: {:?}",
-      marker_id,
-      markers.selected_entry()
-    );
-    let entry_id = markers.selected_entry().unwrap_or_default();
-    if entry_id < (*scroll + (frame_area.height as usize)) + 4
-    /* status bar is 1, top bar is 3 */
-    {
-      *scroll = entry_id;
+    if markers.is_empty() {
+      *scroll = scroll.saturating_sub(1);
       *state = state.position(*scroll);
+    } else {
+      let _ = markers.select_previous();
+      let entry_id = markers.selected_entry().unwrap_or_default();
+      if entry_id < (*scroll + (frame_area.height as usize)) + 4
+      /* status bar is 1, top bar is 3 */
+      {
+        *scroll = entry_id;
+        *state = state.position(*scroll);
+      }
     }
   } else if key.code == KeyCode::Down {
-    let marker_id = markers.select_next();
-    crate::dbg!(
-      "marker is now {:?}: {:?}\n\t{:?}",
-      marker_id,
-      markers.selected_entry(),
-      markers
-    );
-    let entry_id = markers.selected_entry().unwrap_or_default();
-    if entry_id >= (*scroll + (frame_area.height as usize)) - 4
-    /* status bar is 1, top bar is 3 */
-    {
-      *scroll = entry_id;
+    if markers.is_empty() {
+      *scroll = scroll.saturating_add(1);
       *state = state.position(*scroll);
+    } else {
+      let _ = markers.select_next();
+      let entry_id = markers.selected_entry().unwrap_or_default();
+      if entry_id >= (*scroll + (frame_area.height as usize)) - 4
+      /* status bar is 1, top bar is 3 */
+      {
+        *scroll = entry_id;
+        *state = state.position(*scroll);
+      }
     }
   }
 }

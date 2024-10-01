@@ -2,10 +2,11 @@ use std::{
   collections::VecDeque,
   fs::File,
   io::Write,
-  sync::{Arc, Mutex},
-  time::Duration,
+  sync::{Arc, Mutex, MutexGuard},
+  time::{Duration, Instant},
 };
 
+use chrono::Local;
 use lazy_static::lazy_static;
 
 use crate::TryLockFor;
@@ -28,22 +29,38 @@ lazy_static! {
 pub struct Debug {}
 
 impl Debug {
+  fn format<S: AsRef<str>>(msg: S) -> String {
+    format!(
+      "{}  {}\n",
+      Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+      msg.as_ref(),
+    )
+  }
+
+  fn write<S: AsRef<str>>(f: &mut MutexGuard<'_, File>, s: S) {
+    let entry = Self::format(s);
+    let _ = f.write(entry.as_bytes());
+    let _ = f.flush();
+  }
+
+  fn queue<S: AsRef<str>>(s: S) {
+    if let Ok(mut buf) = debug_log_buf.try_lock_for(Duration::from_millis(50)) {
+      buf.push_back(s.as_ref().to_string())
+    }
+  }
+
   /// Log a message to the [`debug_log_handle`]. If the lock can't be acquired
   /// the messages are queued in [`debug_log_buf`]
   pub fn log<S: AsRef<str>>(msg: S) {
     if let Ok(mut f) = debug_log_handle.try_lock_for(Duration::from_millis(50)) {
       if let Ok(mut buf) = debug_log_buf.try_lock_for(Duration::from_millis(50)) {
         while let Some(e) = buf.pop_front() {
-          let _ = write!(f, "{}\n", e.as_str().trim());
-          let _ = f.flush();
+          Self::write(&mut f, e.as_str().trim());
         }
       }
-      let _ = write!(f, "{}\n", msg.as_ref().trim());
-      let _ = f.flush();
+      Self::write(&mut f, msg);
     } else {
-      if let Ok(mut buf) = debug_log_buf.try_lock_for(Duration::from_millis(50)) {
-        buf.push_back(msg.as_ref().to_string())
-      }
+      Self::queue(msg);
     }
   }
 }

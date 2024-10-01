@@ -123,16 +123,16 @@ macro_rules! err {
     $crate::Error::new(
       $kind,
       Some(format!("{}", $msg)),
-      Some($cause),
+      Some(Box::new($cause)),
       Some($crate::here!()),
     )
   };
 
-  ($kind:expr, $fmt:expr, ($args:expr),+) => {
+  ($kind:expr, $fmt:expr$(, $args:expr)*) => {
     $crate::Error::new(
       $kind,
       Some(format!("{}", format_args!($fmt, $( $args ),*))),
-      Some($cause),
+      None,
       Some($crate::here!()),
     )
   };

@@ -1,10 +1,5 @@
 use std::{
-  fmt::Display,
-  io,
-  ops::{Deref, DerefMut, Range},
-  path::{Path, PathBuf},
-  process::{Child, Command, ExitStatus, Stdio},
-  str::FromStr,
+  ops::Range,
   sync::{
     mpsc::{channel, Receiver},
     Arc, Mutex,
@@ -18,417 +13,9 @@ use ratatui::{
   text::{Line, Span},
 };
 
-use crate::{
-  dbg, CapturedMarker, Debug, Error, ErrorKind, MarkerRef, Markers, TryLockFor, BUILD_MARKERS,
-};
+use crate::{BuildTagKind, Debug, Markers, TryLockFor};
 
-/// Represent the `cargo build` process.
-pub struct BuildCommand(Child);
-
-impl BuildCommand {
-  /// Spawn the process, setting piped stdout/stderr streams
-  pub fn spawn(args: Vec<String>) -> io::Result<Self> {
-    let child = Command::new("cargo")
-      .arg("build")
-      .args(args)
-      .stderr(Stdio::piped())
-      .stdout(Stdio::piped())
-      .spawn()?;
-
-    Ok(BuildCommand(child))
-  }
-}
-
-impl Deref for BuildCommand {
-  type Target = Child;
-
-  fn deref(&self) -> &Self::Target {
-    &self.0
-  }
-}
-
-impl DerefMut for BuildCommand {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.0
-  }
-}
-
-/// Represent a stream origin: either [`std::io::Stdout`] or [`std::io::Stderr`]
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub enum Origin {
-  Stdout,
-  Stderr,
-}
-
-impl Default for Origin {
-  fn default() -> Self {
-    Self::Stdout
-  }
-}
-
-/// Represent a source-code location. Captured from Cargo's output
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct Location {
-  /// The file
-  path: PathBuf,
-  /// The line
-  line: Option<usize>,
-  /// The column
-  column: Option<usize>,
-}
-
-impl FromStr for Location {
-  type Err = crate::Error;
-
-  fn from_str(s: &str) -> Result<Self, Self::Err> {
-    let parts = s.split(':').collect::<Vec<_>>();
-    let path: PathBuf = parts[0].into();
-    let mut line = None;
-    let mut column = None;
-    if parts.len() > 1 {
-      line = match parts[1].parse::<usize>() {
-        Ok(line_num) => Some(line_num),
-        Err(e) => {
-          crate::dbg!("error: failed to parse line num from '{}', {}", parts[1], e);
-          None
-        }
-      };
-    }
-    if parts.len() > 2 {
-      column = match parts[2].parse::<usize>() {
-        Ok(line_num) => Some(line_num),
-        Err(e) => {
-          return Err(Error::new(
-            ErrorKind::Parsing,
-            Some(format!(
-              "error: failed to parse column num from '{}', {}",
-              parts[2], e
-            )),
-            None,
-            Some(crate::here!()),
-          ));
-        }
-      };
-    }
-    return Ok(Location { path, line, column });
-  }
-}
-
-impl Display for Location {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      f,
-      "{}{}{}",
-      self.path.display(),
-      match self.line {
-        Some(l) => format!(": {}", l),
-        None => String::new(),
-      },
-      match self.line {
-        Some(_) => match self.column {
-          Some(c) => format!(": {}", c),
-          None => String::new(),
-        },
-        None => String::new(),
-      }
-    )
-  }
-}
-impl Location {
-  pub fn new<P: AsRef<Path>>(path: P, line: Option<usize>, column: Option<usize>) -> Self {
-    Self {
-      path: path.as_ref().to_path_buf(),
-      line,
-      column,
-    }
-  }
-}
-
-#[macro_export]
-macro_rules! here {
-  () => {
-    $crate::Location::new(
-      std::path::PathBuf::from(file!()),
-      Some(line!() as usize),
-      Some(column!() as usize),
-    )
-  };
-}
-
-/// Represent the kind of a BuildTag, put on each [`BuildEntry`]
-#[derive(Debug, Clone, PartialEq, PartialOrd, Copy)]
-pub enum BuildTagKind {
-  /// A cargo warning
-  Warning,
-  /// A cargo error
-  Error,
-  /// A cargo note
-  Note,
-  /// Hide this entry from the UI
-  Hidden,
-  /// A marker's location
-  Location,
-}
-
-impl Display for BuildTagKind {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{:?}", self)
-  }
-}
-
-/// Represent some extra information put on [`BuildEntry`]
-#[derive(Debug, Clone)]
-pub struct BuildTag {
-  kind: BuildTagKind,
-  marker: Option<CapturedMarker>,
-  location: Option<Location>,
-}
-
-impl BuildTag {
-  /// Construct a marker tag
-  pub fn marker<C: AsRef<str>>(k: BuildTagKind, range: Range<usize>, capture: C) -> Self {
-    Self {
-      kind: k,
-      marker: Some(CapturedMarker {
-        range,
-        text: capture.as_ref().to_string(),
-      }),
-      location: None,
-    }
-  }
-
-  /// Construct a warning marker tag
-  pub fn warning<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self::marker(BuildTagKind::Warning, range, capture)
-  }
-
-  /// Construct a error marker tag
-  pub fn error<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self::marker(BuildTagKind::Error, range, capture)
-  }
-
-  /// Construct a error marker tag
-  pub fn note<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self::marker(BuildTagKind::Note, range, capture)
-  }
-
-  /// Construct a hidden tag
-  pub fn hidden() -> Self {
-    Self {
-      kind: BuildTagKind::Hidden,
-      marker: None,
-      location: None,
-    }
-  }
-
-  /// Construct a location tag (next line after [`BuildTagKind::Error`]/[`BuildTagKind::Warning`] markers)
-  pub fn location<P: AsRef<Path>>(path: P, line: Option<usize>, column: Option<usize>) -> Self {
-    Self {
-      kind: BuildTagKind::Location,
-      marker: None,
-      location: Some(Location {
-        path: path.as_ref().to_path_buf(),
-        line,
-        column,
-      }),
-    }
-  }
-}
-
-impl PartialEq for BuildTag {
-  fn eq(&self, other: &Self) -> bool {
-    return self.kind == other.kind;
-  }
-}
-
-impl PartialOrd for BuildTag {
-  fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-    return self.kind.partial_cmp(&other.kind);
-  }
-}
-
-/// Represent an output line written by the cargo build process [`BuildCommand`]
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
-pub struct BuildEntry {
-  created_at: Instant,
-  message: String,
-  origin: Origin,
-  tags: Vec<BuildTag>,
-}
-
-impl BuildEntry {
-  /// Construct a new entry
-  pub fn new<M: AsRef<str>>(msg: M, orig: Origin) -> Self {
-    Self {
-      created_at: Instant::now(),
-      message: msg.as_ref().to_string(),
-      origin: orig,
-      tags: vec![],
-    }
-  }
-
-  pub fn with_tags<I: IntoIterator<Item = BuildTag>>(mut self, tags: I) -> Self {
-    self.tags.extend(tags);
-    self
-  }
-
-  pub fn with_created_at(mut self, at: Instant) -> Self {
-    self.created_at = at;
-    self
-  }
-
-  /// Retrieve the [`Instant`] this entry was created
-  pub fn created_at(&self) -> &Instant {
-    &self.created_at
-  }
-
-  /// Retrieve the line's content
-  pub fn message(&self) -> &String {
-    &self.message
-  }
-
-  /// Retrieve the [`Origin`] this entry was created from
-  pub fn origin(&self) -> Origin {
-    self.origin
-  }
-
-  /// Checks if this entry has a [`BuildTagKind::Error`] attached to it.
-  pub fn is_error(&self) -> bool {
-    self.has_tag(BuildTagKind::Error)
-  }
-
-  /// Checks if this entry has a [`BuildTagKind::Warning`] attached to it.
-  pub fn is_warning(&self) -> bool {
-    self.has_tag(BuildTagKind::Warning)
-  }
-
-  /// Checks if this entry has a [`BuildTagKind::Warning`] attached to it.
-  pub fn is_note(&self) -> bool {
-    self.has_tag(BuildTagKind::Note)
-  }
-
-  /// Define a [`BuildTag`]
-  pub fn set_tag(&mut self, t: BuildTag) {
-    if let Some(tag) = self.tag_mut(t.kind) {
-      *tag = t;
-    } else {
-      self.tags.push(t);
-    }
-  }
-
-  /// Retrieve a mutable ref to an existing [`BuildTag`]
-  pub fn tag_mut(&mut self, t: BuildTagKind) -> Option<&mut BuildTag> {
-    self.tags.iter_mut().find(|cur| cur.kind == t)
-  }
-
-  /// Retrieve a ref to an existing [`BuildTag`]
-  pub fn tag(&self, t: BuildTagKind) -> Option<&BuildTag> {
-    self.tags.iter().find(|cur| cur.kind == t)
-  }
-
-  /// Retrieve any [`Marker`] associated to this tag
-  pub fn marker(&self) -> Option<MarkerRef> {
-    for known_marker in BUILD_MARKERS.iter() {
-      if let Some(tag) = self.tag(known_marker.tag) {
-        return Some(MarkerRef::new(tag.kind, tag.marker.as_ref(), known_marker));
-      }
-    }
-    return None;
-  }
-
-  /// Retrieve all tags
-  pub fn tags(&self) -> &Vec<BuildTag> {
-    &self.tags
-  }
-
-  /// Retrieve all mutable tags
-  pub fn tags_mut(&mut self) -> &mut Vec<BuildTag> {
-    &mut self.tags
-  }
-
-  /// Retrieve the [`BuildTagKind::Location`] tag assigned to this node ([`Location`])
-  pub fn location(&self) -> Option<&BuildTag> {
-    self.tag(BuildTagKind::Location)
-  }
-
-  /// Check if this entry contains a tag by it's [`BuildTagKind`]
-  pub fn has_tag(&self, k: BuildTagKind) -> bool {
-    for t in &self.tags {
-      if t.kind == k {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /// Format a [`Location`] string if it is defined on this [`BuildEntry`]
-  pub fn location_str(&self) -> Option<String> {
-    self.location().map(|t| {
-      format!(
-        "{}",
-        match t.location.as_ref() {
-          Some(Location { path, line, column }) => format!(
-            "{}{}{}",
-            path.display(),
-            match line {
-              Some(line) => format!(":{}", line),
-              None => String::new(),
-            },
-            match column {
-              Some(column) => format!(":{}", column),
-              None => String::new(),
-            }
-          ),
-          _ => String::new(),
-        }
-      )
-    })
-  }
-}
-
-impl<S: AsRef<str>> From<S> for BuildEntry {
-  fn from(value: S) -> Self {
-    BuildEntry::new(value.as_ref(), Origin::default())
-  }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MarkedBlock<'a> {
-  marker: MarkerRef<'a>,
-  range: Range<usize>,
-  entries: Vec<&'a BuildEntry>,
-}
-
-impl<'a> MarkedBlock<'a> {
-  pub fn new(marker: MarkerRef<'a>, range: Range<usize>, entries: Vec<&'a BuildEntry>) -> Self {
-    Self {
-      marker,
-      range,
-      entries,
-    }
-  }
-
-  pub fn marker(&self) -> &MarkerRef<'a> {
-    &self.marker
-  }
-  pub fn marker_mut(&mut self) -> &mut MarkerRef<'a> {
-    &mut self.marker
-  }
-
-  pub fn range(&self) -> &Range<usize> {
-    &self.range
-  }
-  pub fn range_mut(&mut self) -> &mut Range<usize> {
-    &mut self.range
-  }
-
-  pub fn entries(&self) -> &Vec<&'a BuildEntry> {
-    &self.entries
-  }
-  pub fn entries_mut(&mut self) -> &mut Vec<&'a BuildEntry> {
-    &mut self.entries
-  }
-}
+use super::{BuildEntry, BuildTag, Location, MarkedBlock};
 
 /// The BuildOutput struct prepares the [`BuildCommand`] raw output lines.
 /// It creates the necessary [`ratatui`] elements: [`Line`] and [`Span`]
@@ -669,9 +256,9 @@ impl<'a> BuildOutput<'a> {
           for (_batch_entry_id, (global_entry_id, entry)) in batch.into_iter().enumerate() {
             let mut line = Line::default(); //format!("{} | {}", entry_id, entry.message().to_string());
             let mut margin = Span::default();
-            let mut message = entry.message.clone();
+            let mut message = entry.message().clone();
             if let Some(marker) = entry.marker() {
-              dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
+              crate::dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
               let captured = marker.captured().unwrap();
               margin = margin.content(captured.text.clone());
               margin = margin.style(marker.declared().style);
@@ -701,14 +288,14 @@ impl<'a> BuildOutput<'a> {
       for th in threads {
         let _ = th.join();
       }
-      dbg!("prepare_mt: all workers done, receiving data ...");
+      crate::dbg!("prepare_mt: all workers done, receiving data ...");
       self
         .prepared
         .resize(self.prepared.len() + num_prepared, Line::default());
       self.cursor += num_prepared;
       for r in recv {
         if let Ok((batch_id, batch)) = r.try_recv() {
-          dbg!(
+          crate::dbg!(
             "prepare_mt: worker #{} produced {} lines",
             batch_id,
             batch.len()
@@ -733,17 +320,17 @@ impl<'a> BuildOutput<'a> {
         for (entry_id, location) in g.iter() {
           let block = self.block_at(*entry_id);
           if let Some(block) = block {
-            for i in block.range {
+            for i in block.range() {
               self.entries[i].set_tag(BuildTag::location(
-                location.path.clone(),
-                location.line,
-                location.column,
+                location.path().clone(),
+                location.line(),
+                location.column(),
               ))
             }
           }
         }
       }
-      dbg!(
+      crate::dbg!(
         "prepare_mt: done preparing {} entries in {}s (selected marker: {:?})",
         num_prepared,
         (Instant::now() - start_time).as_secs_f32(),
@@ -805,15 +392,6 @@ impl<'a, T: Into<BuildEntry>, I: IntoIterator<Item = T>> From<I> for BuildOutput
   }
 }
 
-/// Represent a cargo build event
-#[derive(Debug, Clone, Copy)]
-pub enum BuildEvent {
-  /// Cargo process spawned
-  BuildStarted,
-  /// Cargo process finished
-  BuildFinished(ExitStatus),
-}
-
 #[cfg(test)]
 mod tests {
   use std::ops::Range;
@@ -845,7 +423,7 @@ mod tests {
           BuildTag::warning(0..8, "warning:"),
           BuildTag::location("src/lib\\build.rs", Some(450), Some(7))
         ])
-        .with_created_at(unprepared[0].created_at)
+        .with_created_at(unprepared[0].created_at().clone())
     );
   }
 
