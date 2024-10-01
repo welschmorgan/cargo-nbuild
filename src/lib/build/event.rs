@@ -7,4 +7,6 @@ pub enum BuildEvent {
   BuildStarted,
   /// Cargo process finished
   BuildFinished(ExitStatus),
+  /// Compilation error detected
+  BuildError(usize),
 }

@@ -1,7 +1,7 @@
 use std::{
   ops::Range,
   sync::{
-    mpsc::{channel, Receiver},
+    mpsc::{channel, Receiver, Sender},
     Arc, Mutex,
   },
   thread::spawn,
@@ -15,7 +15,7 @@ use ratatui::{
 
 use crate::{BuildTagKind, Debug, Markers, TryLockFor};
 
-use super::{BuildEntry, BuildTag, Location, MarkedBlock};
+use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 
 /// The BuildOutput struct prepares the [`BuildCommand`] raw output lines.
 /// It creates the necessary [`ratatui`] elements: [`Line`] and [`Span`]
@@ -211,7 +211,7 @@ impl<'a> BuildOutput<'a> {
 
   /// Prepare the entries that have not been processed yet
   /// by batch processing in multiple threads.
-  pub fn prepare(&mut self) {
+  pub fn prepare(&mut self, tx_build_events: Sender<BuildEvent>) {
     let mut threads = vec![];
     let start_time = Instant::now();
     let mut num_prepared = 0;
@@ -258,7 +258,7 @@ impl<'a> BuildOutput<'a> {
             let mut margin = Span::default();
             let mut message = entry.message().clone();
             if let Some(marker) = entry.marker() {
-              crate::dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
+              // crate::dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
               let captured = marker.captured().unwrap();
               margin = margin.content(captured.text.clone());
               margin = margin.style(marker.declared().style);
@@ -302,6 +302,11 @@ impl<'a> BuildOutput<'a> {
           );
           for entry in batch {
             if let Some(_) = entry.entry.tag(BuildTagKind::Error) {
+              let _ = tx_build_events.send(BuildEvent::BuildError(entry.entry_id));
+              if self.markers.selected().is_none() {
+                self.markers.select(entry.entry_id);
+                crate::dbg!("Auto-selecting entry # {}", entry.entry_id);
+              }
               self.errors.push(entry.entry_id);
             }
             if let Some(_) = entry.entry.tag(BuildTagKind::Warning) {

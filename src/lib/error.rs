@@ -13,6 +13,8 @@ pub enum ErrorKind {
   LockTimeout,
   /// Parsing failed
   Parsing,
+  /// Encoding/decoding failed
+  Codec,
 }
 
 impl Display for ErrorKind {
@@ -25,6 +27,7 @@ impl Display for ErrorKind {
         Self::LockPoisoned => "lock poisoned",
         Self::LockTimeout => "lock timeout",
         Self::Parsing => "parsing failed",
+        Self::Codec => "codec",
       }
     )
   }

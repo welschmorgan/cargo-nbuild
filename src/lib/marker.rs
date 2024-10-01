@@ -315,7 +315,7 @@ impl From<&[BuildEntry]> for Markers {
       tags: entries
         .iter()
         .enumerate()
-        .inspect(|(id, entry)| crate::dbg!(format!("entry #{}: {:?}", id, entry.tags())))
+        // .inspect(|(id, entry)| crate::dbg!(format!("entry #{}: {:?}", id, entry.tags())))
         .filter_map(|(id, entry)| entry.marker().map(|marker| (id, marker.kind())))
         .collect::<Vec<_>>(),
       selected: None,
@@ -343,8 +343,7 @@ mod tests {
   use std::ops::Range;
 
   use crate::{
-    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef,
-    Origin,
+    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef, Origin,
   };
 
   use super::Markers;

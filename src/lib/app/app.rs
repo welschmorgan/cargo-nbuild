@@ -3,9 +3,12 @@ use crate::{
 };
 
 use std::{
+  cell::RefCell,
   collections::VecDeque,
   io::{self, stdin, stdout, BufRead, BufReader},
+  ops::Deref,
   process::ExitStatus,
+  rc::Rc,
   sync::mpsc::{channel, Receiver, Sender},
   thread::{spawn, JoinHandle},
   time::Duration,
@@ -81,6 +84,7 @@ impl App {
     let render_options = self.options.clone();
     let build_options = self.options.clone();
 
+    let th_tx_events = tx_build_events.clone();
     self.threads = VecDeque::from([
       // render
       spawn(move || {
@@ -89,6 +93,7 @@ impl App {
           terminal,
           tx_user_quit,
           rx_build_output,
+          th_tx_events,
           rx_build_events,
         )
       }),
@@ -203,10 +208,18 @@ fn render(
   terminal: DefaultTerminal,
   user_quit: Sender<bool>,
   build_output: Receiver<Vec<BuildEntry>>,
+  tx_build_events: Sender<BuildEvent>,
   build_events: Receiver<BuildEvent>,
 ) {
   Debug::log("render thread started");
-  let app_result = render_loop(options, terminal, user_quit, build_output, build_events);
+  let app_result = render_loop(
+    options,
+    terminal,
+    user_quit,
+    build_output,
+    tx_build_events,
+    build_events,
+  );
   ratatui::restore();
   let _ = execute!(stdout(), DisableMouseCapture);
   if let Err(e) = app_result {
@@ -221,6 +234,7 @@ fn render_loop(
   mut terminal: DefaultTerminal,
   user_quit: Sender<bool>,
   build_output: Receiver<Vec<BuildEntry>>,
+  tx_build_events: Sender<BuildEvent>,
   build_events: Receiver<BuildEvent>,
 ) -> io::Result<()> {
   let mut build = BuildOutput::default().with_noise_removed(false);
@@ -235,16 +249,18 @@ fn render_loop(
   let mut show_help = false;
   let mut markers = Markers::default();
   let frame_area: Rect = terminal.get_frame().area();
+  let status_bar = Rc::new(RefCell::new(StatusBar::default()));
   loop {
     build.pull(&build_output);
     // let output_changed = build.prepare();
-    build.prepare();
+    build.prepare(tx_build_events.clone());
     *markers.tags_mut() = build.markers().tags().clone();
     if let Some(selected) = markers.selected() {
       build.markers_mut().select(selected);
     }
     let build_lines = build.display();
     if let Ok(e) = build_events.try_recv() {
+      crate::dbg!("Received {:?}", e);
       status_entry = Some(e);
     }
     // if first_render || output_changed || key_event {
@@ -279,15 +295,16 @@ fn render_loop(
         Paragraph::new(Line::default().spans(["H: Show help"])).block(Block::bordered());
 
       if let Some(status) = status_entry.as_ref() {
-        let status_bar = StatusBar::default()
+        let new_status = (*status_bar.borrow())
           .with_event(*status)
           .with_num_prepared_lines(build.cursor())
           .with_num_output_lines(build.entries().len())
           .with_num_notes(num_notes)
           .with_num_errors(num_errs)
           .with_num_warnings(num_warns);
-        frame.render_widget(status_bar, status_area);
+        *status_bar.borrow_mut() = new_status;
       }
+      frame.render_widget(*status_bar.borrow(), status_area);
       let log_view = LogView::default()
         .with_content(build_lines.clone())
         .with_scroll(vertical_scroll);
