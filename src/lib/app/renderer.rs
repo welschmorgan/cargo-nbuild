@@ -19,8 +19,8 @@ use ratatui::{
 };
 
 use crate::{
-  BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, MarkedBlock, MarkerSelection,
-  Markers, SearchBar, SearchState, StatusBar, StatusMessage,
+  BuildEntry, BuildEvent, BuildOutput, BuildTagKind, Debug, HelpMenu, LogView, MarkedBlock,
+  MarkerSelection, Markers, SearchBar, SearchState, StatusBar, StatusMessage,
 };
 
 use super::AppOptions;
@@ -35,6 +35,11 @@ const HELP_MENU: &'static [(&'static str, &'static str)] = &[
   ("End", "go to the last output row"),
   ("Up", "go to the previous marker (error/warning/note)"),
   ("Down", "go to the next marker (error/warning/note)"),
+  ("/", "enter search mode"),
+  ("Esc", "exit search mode"),
+  ("e", "show first error"),
+  ("w", "show first warning"),
+  ("n", "show first note"),
 ];
 
 pub struct Renderer {
@@ -300,6 +305,17 @@ impl Renderer {
     }
   }
 
+  fn find_first_marker(markers: &Markers, kind: BuildTagKind) -> Option<MarkerSelection> {
+    if let Some((marker_id, (entry_id, _tag))) = markers
+      .iter()
+      .enumerate()
+      .find(|(_marker_id, (_entry_id, tag))| *tag == kind)
+    {
+      return Some(MarkerSelection::new(marker_id, *entry_id, None));
+    }
+    return None;
+  }
+
   /// Handle user keypresses
   fn handle_key_press(
     key: KeyEvent,
@@ -323,6 +339,18 @@ impl Renderer {
         Debug::log(format!("failed to quit app, {}", e));
       }
       *stop = true;
+    } else if key.code == KeyCode::Char('e') {
+      if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Error) {
+        Self::select_marker(&sel, markers, scroll, state, log_area);
+      }
+    } else if key.code == KeyCode::Char('w') {
+      if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Warning) {
+        Self::select_marker(&sel, markers, scroll, state, log_area);
+      }
+    } else if key.code == KeyCode::Char('n') {
+      if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Note) {
+        Self::select_marker(&sel, markers, scroll, state, log_area);
+      }
     } else if key.code == KeyCode::Char('j') {
       if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
         *scroll = scroll.saturating_add(1);
@@ -376,31 +404,16 @@ impl Renderer {
       }
     } else if key.code == KeyCode::Up {
       if let Some(previous) = markers.previous_selection() {
-        Self::select_marker(
-          build_output.block_size(previous.entry_id).unwrap(),
-          &previous,
-          markers,
-          scroll,
-          state,
-          log_area,
-        );
+        Self::select_marker(&previous, markers, scroll, state, log_area);
       }
     } else if key.code == KeyCode::Down {
       if let Some(next) = markers.next_selection() {
-        Self::select_marker(
-          build_output.block_size(next.marker_id).unwrap(),
-          &next,
-          markers,
-          scroll,
-          state,
-          log_area,
-        );
+        Self::select_marker(&next, markers, scroll, state, log_area);
       }
     }
   }
 
   fn select_marker(
-    _block_size: usize,
     selection: &MarkerSelection,
     markers: &mut Markers,
     scroll: &mut usize,
