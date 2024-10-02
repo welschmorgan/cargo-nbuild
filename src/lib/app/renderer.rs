@@ -11,7 +11,7 @@ use ratatui::{
     event::{self, DisableMouseCapture, KeyCode, KeyEvent, KeyEventKind, MouseEventKind},
     execute,
   },
-  layout::{Constraint, Layout, Position, Rect},
+  layout::{Constraint, Layout, Rect},
   style::{Style, Stylize},
   text::Line,
   widgets::{Block, Paragraph, ScrollbarState},
@@ -122,11 +122,11 @@ impl Renderer {
     let mut build_status_entry: Option<BuildEvent> = None;
     let mut show_help = false;
     let mut markers = Markers::default();
-    let frame_area: Rect = terminal.get_frame().area();
+    let _frame_area: Rect = terminal.get_frame().area();
     let status_bar = Rc::new(RefCell::new(StatusBar::default()));
     let mut search_state: Option<SearchState> = None;
     let (tx_search_query, rx_search_query) = channel::<String>();
-    let mut last_search_result: Option<(MarkedBlock<'_>, MarkerSelection)> = None;
+    let mut _last_search_result: Option<(MarkedBlock<'_>, MarkerSelection)> = None;
     let mut stop = false;
     while !stop {
       build.pull(&build_output);
@@ -146,7 +146,7 @@ impl Renderer {
               .collect::<Vec<_>>()
               .join("\n")
           );
-          last_search_result = Some((block.clone(), selection.clone()));
+          _last_search_result = Some((block.clone(), selection.clone()));
           *markers.selection_mut() = Some(selection);
           search_state = None;
           status_entry = Some(StatusMessage::new([(
@@ -400,7 +400,7 @@ impl Renderer {
   }
 
   fn select_marker(
-    block_size: usize,
+    _block_size: usize,
     selection: &MarkerSelection,
     markers: &mut Markers,
     scroll: &mut usize,

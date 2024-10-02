@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::{Location, MarkerRef, BUILD_MARKERS};
+use crate::{MarkerRef, BUILD_MARKERS};
 
 use super::{BuildTag, BuildTagKind, Origin};
 

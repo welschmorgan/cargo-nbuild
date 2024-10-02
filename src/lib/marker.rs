@@ -463,7 +463,7 @@ mod tests {
     ];
     let mut markers = Markers::from(&entries);
     markers.select(1, None);
-    assert_eq!(markers.selection, Some(MarkerSelection::new(1, 3, None)));
+    assert_eq!(markers.selection, Some(MarkerSelection::new(1, 2, None)));
     assert_eq!(markers.selected_entry(), Some(2));
     assert_eq!(markers.selected_kind(), Some(BuildTagKind::Warning));
   }
@@ -500,12 +500,12 @@ mod tests {
     // second time goes from Some(0) -> Some(1)
     assert_eq!(
       markers.select_next(),
-      Some(&MarkerSelection::new(1, 3, None))
+      Some(&MarkerSelection::new(1, 2, None))
     );
     // third time goes from Some(1) -> Some(1) as it is out-of-bounds
     assert_eq!(
       markers.select_next(),
-      Some(&MarkerSelection::new(1, 3, None))
+      Some(&MarkerSelection::new(1, 2, None))
     );
   }
 

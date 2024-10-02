@@ -1,34 +1,22 @@
 use crate::{
-  dbg, BuildEntry, BuildEvent, BuildOutput, Debug, HelpMenu, LogView, Markers, Origin, StatusBar,
+  BuildEntry, BuildEvent, Debug, Origin,
 };
 
 use std::{
-  cell::RefCell,
   collections::VecDeque,
-  io::{self, stdin, stdout, BufRead, BufReader},
-  ops::Deref,
-  process::ExitStatus,
-  rc::Rc,
-  sync::mpsc::{channel, Receiver, Sender},
+  io::{stdout},
+  sync::mpsc::{channel},
   thread::{spawn, JoinHandle},
-  time::Duration,
 };
 
-use crate::BuildCommand;
 use ratatui::{
   crossterm::{
     event::{
-      self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyEventKind,
-      MouseEventKind,
+      DisableMouseCapture, EnableMouseCapture,
     },
     execute,
   },
-  layout::{Constraint, Layout, Rect},
   restore,
-  style::Stylize,
-  text::Line,
-  widgets::{Block, Paragraph, ScrollbarState},
-  DefaultTerminal,
 };
 
 use super::{AppOptions, Builder, Renderer, Scanner};

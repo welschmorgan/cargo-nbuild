@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Display, process::ExitStatus};
+use std::{fmt::Display, process::ExitStatus};
 
 use ratatui::{
   style::{Style, Stylize},
@@ -6,7 +6,7 @@ use ratatui::{
   widgets::{Paragraph, Widget},
 };
 
-use crate::{BuildEvent, ErrorKind};
+use crate::{BuildEvent};
 
 #[derive(Clone, Copy, Debug)]
 pub struct StatusPart([u8; STATUS_MSG_LEN], usize, Style);

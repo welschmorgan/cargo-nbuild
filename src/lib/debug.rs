@@ -3,7 +3,7 @@ use std::{
   fs::File,
   io::Write,
   sync::{Arc, Mutex, MutexGuard},
-  time::{Duration, Instant},
+  time::{Duration},
 };
 
 use chrono::Local;

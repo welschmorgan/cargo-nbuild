@@ -34,8 +34,9 @@ use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 /// use cargo_nbuild::{BuildOutput, BuildEntry, Origin};
 ///
 /// let mut build = BuildOutput::default();
+/// let (tx, rx) = std::sync::mpsc::channel();
 /// build.push(BuildEntry::new("my log", Origin::Stdout));
-/// build.prepare();
+/// build.prepare(tx);
 /// let _lines = build.display();
 /// ```
 pub struct BuildOutput<'a> {
@@ -204,7 +205,7 @@ impl<'a> BuildOutput<'a> {
         .markers
         .iter()
         .enumerate()
-        .find_map(|(marker_id, (entry_id, tag))| {
+        .find_map(|(marker_id, (entry_id, _tag))| {
           if *entry_id == range.start {
             return Some(marker_id);
           }
@@ -480,7 +481,8 @@ mod tests {
     blasdf asdfl alsdf
     asdfasdf"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    build.prepare();
+    let (tx, rx) = channel();
+    build.prepare(tx);
     assert_eq!(build.block_range_at(1), Some(Range { start: 0, end: 4 }));
     assert_eq!(build.block_range_at(5), Some(Range { start: 4, end: 7 }));
   }
@@ -495,10 +497,12 @@ mod tests {
     blasdf asdfl alsdf
     asdfasdf"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    build.prepare();
+    let (tx, rx) = channel();
+    build.prepare(tx);
     assert_eq!(
       build.block_at(1),
       Some(MarkedBlock::new(
+        0,
         MarkerRef::known(
           BuildTagKind::Warning,
           Some(&CapturedMarker::new(0, "warning:"))
@@ -510,6 +514,7 @@ mod tests {
     assert_eq!(
       build.block_at(5),
       Some(MarkedBlock::new(
+        1,
         MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(4, "error:"))),
         4..7,
         build.entries[4..7].iter().collect::<Vec<_>>(),
