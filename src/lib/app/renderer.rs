@@ -141,7 +141,13 @@ impl Renderer {
     let mut search_state: Option<SearchState> = None;
     let (tx_search_query, rx_search_query) = channel::<String>();
     let mut _last_search_result: Option<(MarkedBlock<'_>, MarkerSelection)> = None;
-    let mut filter: Option<BuildTagKind> = None;
+    let mut filter: Option<BuildTagKind> = match options.show_only_errors {
+      true => {
+        crate::dbg!("Default filter is {:?}", BuildTagKind::Error);
+        Some(BuildTagKind::Error)
+      }
+      false => None,
+    };
     let mut stop = false;
     while !stop {
       build.pull(&build_output);

@@ -2,12 +2,15 @@
 name = "cargo-nbuild"
 version = "0.1.0"
 edition = "2021"
-authors = ["welschmorgan@gmail.com"]
-description = "Primary goal was to wrap cargo build to filter its output, but can be used on any build report"
+authors = ["Morgan Welsch <welschmorgan@gmail.com>"]
+description = """A command line utility to wrap build reports.
+It helps with display and finding of errors, warnings and notes.
+It was primarily conceived to wrap the `cargo build` process
+
+You can pipe any build report through stdin."""
 
 [[bin]]
 name = "cargo-nbuild"
-
 path = "src/main.rs"
 
 [lib]
