@@ -19,8 +19,8 @@ use ratatui::{
 };
 
 use crate::{
-  BuildEntry, BuildEvent, BuildOutput, BuildTagKind, Debug, HelpMenu, LogView, MarkedBlock,
-  MarkerSelection, Markers, SearchBar, SearchState, StatusBar, StatusMessage,
+  BuildEntry, BuildEvent, BuildOutput, BuildTagKind, Debug, HelpMenu, LogEntry, LogView,
+  MarkedBlock, MarkerSelection, Markers, SearchBar, SearchState, StatusBar, StatusMessage,
 };
 
 use super::AppOptions;
@@ -40,6 +40,7 @@ const HELP_MENU: &'static [(&'static str, &'static str)] = &[
   ("e", "show first error"),
   ("w", "show first warning"),
   ("n", "show first note"),
+  ("f", "filter entries: show only errors"),
 ];
 
 pub struct Renderer {
@@ -138,6 +139,7 @@ impl Renderer {
     let mut search_state: Option<SearchState> = None;
     let (tx_search_query, rx_search_query) = channel::<String>();
     let mut _last_search_result: Option<(MarkedBlock<'_>, MarkerSelection)> = None;
+    let mut filter: Option<BuildTagKind> = None;
     let mut stop = false;
     while !stop {
       build.pull(&build_output);
@@ -253,9 +255,10 @@ impl Renderer {
           build_status_entry = None;
         }
         frame.render_widget(*status_bar.borrow(), status_area);
-        let log_view = LogView::default()
+        let mut log_view = LogView::default()
           .with_content(build_lines.clone())
           .with_scroll(vertical_scroll);
+        log_view.set_filter(filter);
         frame.render_stateful_widget(log_view, log_area, &mut vertical_scroll_state);
         // frame.render_stateful_widget(log_view, log_area, &mut list_state);
         frame.render_widget(shortcuts, shortcuts_area);
@@ -302,6 +305,7 @@ impl Renderer {
                 &build_lines,
                 &mut search_state,
                 tx_search_query.clone(),
+                &mut filter,
                 &mut show_help,
               );
             }
@@ -342,9 +346,10 @@ impl Renderer {
     user_quit: Sender<bool>,
     log_area: &Rect,
     build_output: &BuildOutput,
-    build_lines: &Vec<Line<'_>>,
+    build_lines: &Vec<LogEntry<'_>>,
     search_value: &mut Option<SearchState>,
     search_query: Sender<String>,
+    filter: &mut Option<BuildTagKind>,
     show_help: &mut bool,
   ) {
     if SearchBar::handle_key(key, search_value, search_query) {
@@ -355,6 +360,13 @@ impl Renderer {
         Debug::log(format!("failed to quit app, {}", e));
       }
       *stop = true;
+    } else if key.code == KeyCode::Char('f') {
+      if filter.is_some() {
+        *filter = None;
+      } else {
+        *filter = Some(BuildTagKind::Error);
+        crate::dbg!("Filtering log entries with {:?}", filter.as_ref().unwrap());
+      }
     } else if key.code == KeyCode::Char('e') {
       if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Error) {
         Self::select_marker(&sel, markers, scroll, state, log_area);

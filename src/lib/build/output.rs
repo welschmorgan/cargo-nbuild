@@ -14,7 +14,7 @@ use ratatui::{
   text::{Line, Span},
 };
 
-use crate::{err, BuildTagKind, Debug, ErrorKind, MarkerSelection, Markers, TryLockFor};
+use crate::{err, BuildTagKind, Debug, ErrorKind, LogEntry, MarkerSelection, Markers, TryLockFor};
 
 use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 
@@ -410,10 +410,16 @@ impl<'a> BuildOutput<'a> {
   }
 
   /// Retrieve the displayable lines
-  pub fn display(&self) -> Vec<Line<'_>> {
-    let mut ret = self.prepared.clone();
+  pub fn display(&self) -> Vec<LogEntry<'_>> {
+    let mut ret = self
+      .prepared
+      .iter()
+      .enumerate()
+      .map(|(id, line)| LogEntry::new(line.clone(), self.entries[id].tags().clone()))
+      .collect::<Vec<_>>();
     if let Some(sel_entry_id) = self.markers.selected_entry() {
-      ret[sel_entry_id].style = ret[sel_entry_id]
+      ret[sel_entry_id].line_mut().style = ret[sel_entry_id]
+        .line()
         .style
         .patch(Style::default().on_light_blue());
     }
