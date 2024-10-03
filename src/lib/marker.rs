@@ -232,9 +232,11 @@ impl Markers {
   pub fn select(&mut self, mut id: usize, text: Option<Range<usize>>) {
     if self.tags.is_empty() {
       self.selection = None;
+      crate::dbg!("Selecting marker #{} -> None (no tags registered yet)", id);
     } else {
       id = id.min(self.tags.len().saturating_sub(1));
       self.selection = Some(MarkerSelection::new(id, self.tags[id].0, text));
+      crate::dbg!("Selecting marker #{} -> {:?}", id, self.selection);
     }
   }
 

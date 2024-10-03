@@ -1,19 +1,15 @@
-use crate::{
-  BuildEntry, BuildEvent, Debug, Origin,
-};
+use crate::{BuildEntry, BuildEvent, Debug, Origin};
 
 use std::{
   collections::VecDeque,
-  io::{stdout},
-  sync::mpsc::{channel},
+  io::stdout,
+  sync::mpsc::channel,
   thread::{spawn, JoinHandle},
 };
 
 use ratatui::{
   crossterm::{
-    event::{
-      DisableMouseCapture, EnableMouseCapture,
-    },
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
   },
   restore,
@@ -40,8 +36,7 @@ impl App {
   fn set_panic_hook() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-      let _ = restore();
-      let _ = execute!(stdout(), DisableMouseCapture);
+      Renderer::restore_terminal();
       Debug::log(format!("Panic {:?}", panic_info));
       hook(panic_info);
     }));

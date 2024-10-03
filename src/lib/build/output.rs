@@ -231,7 +231,7 @@ impl<'a> BuildOutput<'a> {
 
   /// Prepare the entries that have not been processed yet
   /// by batch processing in multiple threads.
-  pub fn prepare(&mut self, tx_build_events: Sender<BuildEvent>) {
+  pub fn prepare(&mut self, tx_build_events: Sender<BuildEvent>) -> bool {
     let mut threads = vec![];
     let start_time = Instant::now();
     let mut num_prepared = 0;
@@ -313,6 +313,7 @@ impl<'a> BuildOutput<'a> {
         .prepared
         .resize(self.prepared.len() + num_prepared, Line::default());
       self.cursor += num_prepared;
+      let mut selection = None;
       for r in recv {
         if let Ok((batch_id, batch)) = r.try_recv() {
           crate::dbg!(
@@ -324,8 +325,7 @@ impl<'a> BuildOutput<'a> {
             if let Some(_) = entry.entry.tag(BuildTagKind::Error) {
               let _ = tx_build_events.send(BuildEvent::BuildError(entry.entry_id));
               if self.markers.selection().is_none() {
-                self.markers.select(entry.entry_id, None);
-                crate::dbg!("Auto-selecting entry # {}", entry.entry_id);
+                selection = Some(entry.entry_id);
               }
               self.errors.push(entry.entry_id);
             }
@@ -341,6 +341,9 @@ impl<'a> BuildOutput<'a> {
         }
       }
       *self.markers.tags_mut() = Markers::from(self.entries.as_slice()).tags().clone();
+      if let Some(sel) = selection {
+        self.select_entry(sel);
+      }
       if let Ok(g) = locations.lock() {
         for (entry_id, location) in g.iter() {
           let block = self.block_at(*entry_id);
@@ -361,7 +364,17 @@ impl<'a> BuildOutput<'a> {
         (Instant::now() - start_time).as_secs_f32(),
         self.markers.selection()
       );
+      return true;
     }
+    false
+  }
+
+  pub fn select_entry(&mut self, entry_id: usize) {
+    let marker_id = match self.block_at(entry_id) {
+      Some(block) => block.marker_id(),
+      None => 0,
+    };
+    self.markers.select(marker_id, None);
   }
 
   /// Retrieve the displayable lines

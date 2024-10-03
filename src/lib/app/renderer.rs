@@ -81,12 +81,16 @@ impl Renderer {
       self.tx_build_events,
       self.build_events,
     );
-    ratatui::restore();
-    let _ = execute!(stdout(), DisableMouseCapture);
+    Self::restore_terminal();
     if let Err(e) = app_result {
       Debug::log(format!("failed to run app, {}", e));
     }
     Debug::log("render thread stopped");
+  }
+
+  pub fn restore_terminal() {
+    ratatui::restore();
+    let _ = execute!(stdout(), DisableMouseCapture);
   }
 
   fn set_cursor_visible(terminal: &mut DefaultTerminal, v: bool) {
@@ -135,7 +139,9 @@ impl Renderer {
     let mut stop = false;
     while !stop {
       build.pull(&build_output);
-      build.prepare(tx_build_events.clone());
+      if build.prepare(tx_build_events.clone()) {
+        *markers.selection_mut() = build.markers_mut().selection().cloned();
+      }
       *markers.tags_mut() = build.markers().tags().clone();
       if let Ok(query) = rx_search_query.try_recv() {
         crate::dbg!("Searching for '{}'", query);
