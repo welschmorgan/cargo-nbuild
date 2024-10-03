@@ -123,6 +123,8 @@ impl Renderer {
       .with_build_events(tx_build_events.clone());
     let mut vertical_scroll_state = ScrollbarState::default();
     let mut vertical_scroll: usize = 0;
+    let mut help_vertical_scroll_state = ScrollbarState::default();
+    let mut help_vertical_scroll: usize = 0;
     let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
     let mut main_pane = Rect::default();
     let mut shortcuts_area = Rect::default();
@@ -272,8 +274,10 @@ impl Renderer {
           frame.set_cursor_position(cursor_pos);
         }
         if show_help {
-          let help = HelpMenu::new().with_keys(HELP_MENU);
-          frame.render_widget(help, frame.area());
+          let help = HelpMenu::new()
+            .with_keys(HELP_MENU)
+            .with_scroll(help_vertical_scroll);
+          frame.render_stateful_widget(help, frame.area(), &mut help_vertical_scroll_state);
         }
       })?;
       // }
@@ -297,6 +301,8 @@ impl Renderer {
                 key,
                 &mut vertical_scroll,
                 &mut vertical_scroll_state,
+                &mut help_vertical_scroll,
+                &mut help_vertical_scroll_state,
                 &mut markers,
                 &mut stop,
                 user_quit.clone(),
@@ -339,8 +345,10 @@ impl Renderer {
   /// Handle user keypresses
   fn handle_key_press(
     key: KeyEvent,
-    scroll: &mut usize,
-    state: &mut ScrollbarState,
+    log_scroll: &mut usize,
+    log_scroll_state: &mut ScrollbarState,
+    help_scroll: &mut usize,
+    help_scroll_state: &mut ScrollbarState,
     markers: &mut Markers,
     stop: &mut bool,
     user_quit: Sender<bool>,
@@ -353,6 +361,15 @@ impl Renderer {
     show_help: &mut bool,
   ) {
     if SearchBar::handle_key(key, search_value, search_query) {
+      return;
+    }
+    if HelpMenu::handle_key(
+      key,
+      show_help,
+      HELP_MENU.len(),
+      help_scroll,
+      help_scroll_state,
+    ) {
       return;
     }
     if key.code == KeyCode::Char('q') {
@@ -369,26 +386,24 @@ impl Renderer {
       }
     } else if key.code == KeyCode::Char('e') {
       if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Error) {
-        Self::select_marker(&sel, markers, scroll, state, log_area);
+        Self::select_marker(&sel, markers, log_scroll, log_scroll_state, log_area);
       }
     } else if key.code == KeyCode::Char('w') {
       if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Warning) {
-        Self::select_marker(&sel, markers, scroll, state, log_area);
+        Self::select_marker(&sel, markers, log_scroll, log_scroll_state, log_area);
       }
     } else if key.code == KeyCode::Char('n') {
       if let Some(sel) = Self::find_first_marker(markers, BuildTagKind::Note) {
-        Self::select_marker(&sel, markers, scroll, state, log_area);
+        Self::select_marker(&sel, markers, log_scroll, log_scroll_state, log_area);
       }
     } else if key.code == KeyCode::Char('j') {
-      if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
-        *scroll = scroll.saturating_add(1);
-        *state = state.position(*scroll);
+      if *log_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
+        *log_scroll = log_scroll.saturating_add(1);
+        *log_scroll_state = log_scroll_state.position(*log_scroll);
       }
     } else if key.code == KeyCode::Char('k') {
-      *scroll = scroll.saturating_sub(1);
-      *state = state.position(*scroll);
-    } else if key.code == KeyCode::Char('h') {
-      *show_help = !*show_help;
+      *log_scroll = log_scroll.saturating_sub(1);
+      *log_scroll_state = log_scroll_state.position(*log_scroll);
     } else if key.code == KeyCode::End {
       crate::dbg!("goto end");
       if !markers.is_empty() {
@@ -400,12 +415,12 @@ impl Renderer {
           markers
         );
         let entry_id = markers.selected_entry().unwrap_or_default();
-        Self::scroll_to_element(entry_id, scroll, log_area);
+        Self::scroll_to_element(entry_id, log_scroll, log_area);
       } else {
-        *scroll = build_lines.len().saturating_sub(log_area.height as usize);
+        *log_scroll = build_lines.len().saturating_sub(log_area.height as usize);
       }
-      crate::dbg!("scroll to line {}", *scroll);
-      *state = state.position(*scroll);
+      crate::dbg!("scroll to line {}", *log_scroll);
+      *log_scroll_state = log_scroll_state.position(*log_scroll);
     } else if key.code == KeyCode::Home {
       crate::dbg!("goto beginning");
       if !markers.is_empty() {
@@ -416,27 +431,27 @@ impl Renderer {
           markers.selected_entry()
         );
         let entry_id = markers.selected_entry().unwrap_or_default();
-        Self::scroll_to_element(entry_id, scroll, log_area);
+        Self::scroll_to_element(entry_id, log_scroll, log_area);
       } else {
-        *scroll = 0;
+        *log_scroll = 0;
       }
-      crate::dbg!("scroll to line {}", *scroll);
-      *state = state.position(*scroll);
+      crate::dbg!("scroll to line {}", *log_scroll);
+      *log_scroll_state = log_scroll_state.position(*log_scroll);
     } else if key.code == KeyCode::PageUp {
-      *scroll = scroll.saturating_sub(log_area.height as usize);
-      *state = state.position(*scroll);
+      *log_scroll = log_scroll.saturating_sub(log_area.height as usize);
+      *log_scroll_state = log_scroll_state.position(*log_scroll);
     } else if key.code == KeyCode::PageDown {
-      if *scroll < build_lines.len().saturating_sub(log_area.height as usize) {
-        *scroll = scroll.saturating_add(log_area.height as usize);
-        *state = state.position(*scroll);
+      if *log_scroll < build_lines.len().saturating_sub(log_area.height as usize) {
+        *log_scroll = log_scroll.saturating_add(log_area.height as usize);
+        *log_scroll_state = log_scroll_state.position(*log_scroll);
       }
     } else if key.code == KeyCode::Up {
       if let Some(previous) = markers.previous_selection() {
-        Self::select_marker(&previous, markers, scroll, state, log_area);
+        Self::select_marker(&previous, markers, log_scroll, log_scroll_state, log_area);
       }
     } else if key.code == KeyCode::Down {
       if let Some(next) = markers.next_selection() {
-        Self::select_marker(&next, markers, scroll, state, log_area);
+        Self::select_marker(&next, markers, log_scroll, log_scroll_state, log_area);
       }
     }
   }

@@ -95,15 +95,18 @@ impl<'a> StatefulWidget for LogView<'a> {
         .collect::<Vec<_>>()
         .clone()
     };
-    *state = state.content_length(lines.len());
+    let num_lines = lines.len();
+    *state = state.content_length(num_lines);
     let log = Paragraph::new(lines)
       .gray()
       .block(Block::bordered().gray())
       .scroll((self.scroll as u16, 0));
     log.render(area, buf);
-    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-      .begin_symbol(Some("↑"))
-      .end_symbol(Some("↓"))
-      .render(area, buf, state)
+    if num_lines + 2 >= area.height as usize {
+      Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"))
+        .render(area, buf, state)
+    }
   }
 }
