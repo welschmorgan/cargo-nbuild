@@ -117,7 +117,9 @@ impl Renderer {
     tx_build_events: Sender<BuildEvent>,
     build_events: Receiver<BuildEvent>,
   ) -> io::Result<()> {
-    let mut build = BuildOutput::default().with_noise_removed(false);
+    let mut build = BuildOutput::default()
+      .with_noise_removed(false)
+      .with_build_events(tx_build_events.clone());
     let mut vertical_scroll_state = ScrollbarState::default();
     let mut vertical_scroll: usize = 0;
     let [mut command_area, mut log_area] = [Rect::default(), Rect::default()];
@@ -139,13 +141,14 @@ impl Renderer {
     let mut stop = false;
     while !stop {
       build.pull(&build_output);
-      if build.prepare(tx_build_events.clone()) {
-        *markers.selection_mut() = build.markers_mut().selection().cloned();
+      if build.prepare() {
+        markers.set_selection(build.markers_mut().selection().cloned());
       }
       *markers.tags_mut() = build.markers().tags().clone();
+      let mut search_selection = None;
       if let Ok(query) = rx_search_query.try_recv() {
         crate::dbg!("Searching for '{}'", query);
-        if let Some((block, selection)) = build.search(&query) {
+        search_selection = if let Some((block, selection)) = build.search(&query) {
           crate::dbg!(
             "Found in block #{} -> {:?}\n{}",
             block.marker_id(),
@@ -158,20 +161,27 @@ impl Renderer {
               .join("\n")
           );
           _last_search_result = Some((block.clone(), selection.clone()));
-          *markers.selection_mut() = Some(selection);
           search_state = None;
           status_entry = Some(StatusMessage::new([(
             format!("Show search result {}/{}", block.marker_id(), markers.len()),
             Style::default(),
           )]));
+          markers.set_selection(Some(selection));
+          markers.selection()
         } else {
           status_entry = Some(StatusMessage::new([
             (" ✗ ".to_string(), Style::default().bold().red()),
             (format!("'{}' not found", query), Style::default()),
-          ]))
-        }
+          ]));
+          None
+        };
       }
-      *build.markers_mut().selection_mut() = markers.selection().cloned();
+      build
+        .markers_mut()
+        .set_selection(markers.selection().cloned());
+      if let Some(search_sel) = search_selection {
+        build.select_entry(search_sel.entry_id, search_sel.region.clone());
+      }
       let build_lines = build.display();
       if let Ok(e) = build_events.try_recv() {
         crate::dbg!("Received {:?}", e);

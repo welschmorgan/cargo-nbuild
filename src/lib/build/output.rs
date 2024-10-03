@@ -8,12 +8,13 @@ use std::{
   time::{Duration, Instant},
 };
 
+use lazy_static::lazy_static;
 use ratatui::{
   style::{Style, Stylize},
   text::{Line, Span},
 };
 
-use crate::{BuildTagKind, Debug, MarkerSelection, Markers, TryLockFor};
+use crate::{err, BuildTagKind, Debug, ErrorKind, MarkerSelection, Markers, TryLockFor};
 
 use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 
@@ -45,6 +46,7 @@ pub struct BuildOutput<'a> {
   warnings: Vec<usize>,
   notes: Vec<usize>,
   errors: Vec<usize>,
+  build_events: Option<Sender<BuildEvent>>,
   remove_noise: bool,
   cursor: usize,
   prepared: Vec<Line<'a>>,
@@ -57,6 +59,7 @@ impl<'a> Default for BuildOutput<'a> {
       entries: Default::default(),
       warnings: Default::default(),
       notes: Default::default(),
+      build_events: Default::default(),
       errors: Default::default(),
       remove_noise: Default::default(),
       cursor: Default::default(),
@@ -82,14 +85,22 @@ impl<'a> BuildOutput<'a> {
     self
   }
 
+  /// If true remove non-marker output lines
+  pub fn with_build_events(mut self, events: Sender<BuildEvent>) -> Self {
+    self.build_events = Some(events);
+    self
+  }
+
   /// Add a new build entry to the unprocessed queue
   pub fn push(&mut self, e: BuildEntry) {
     self.entries.push(e);
   }
 
   /// Add multiple build entries to the unprocessed queue
-  pub fn extend<I: IntoIterator<Item = BuildEntry>>(&mut self, entries: I) {
-    self.entries.extend(entries);
+  pub fn extend<Item: Into<BuildEntry>, Iter: IntoIterator<Item = Item>>(&mut self, entries: Iter) {
+    self
+      .entries
+      .extend(entries.into_iter().map(|e| e.into()).collect::<Vec<_>>());
   }
 
   /// Pull all build entries from the supplied [`Receiver`].
@@ -229,9 +240,15 @@ impl<'a> BuildOutput<'a> {
     None
   }
 
+  pub fn send_event(&self, event: BuildEvent) {
+    if let Some(events) = &self.build_events {
+      let _ = events.send(event);
+    }
+  }
+
   /// Prepare the entries that have not been processed yet
   /// by batch processing in multiple threads.
-  pub fn prepare(&mut self, tx_build_events: Sender<BuildEvent>) -> bool {
+  pub fn prepare(&mut self) -> bool {
     let mut threads = vec![];
     let start_time = Instant::now();
     let mut num_prepared = 0;
@@ -323,7 +340,7 @@ impl<'a> BuildOutput<'a> {
           );
           for entry in batch {
             if let Some(_) = entry.entry.tag(BuildTagKind::Error) {
-              let _ = tx_build_events.send(BuildEvent::BuildError(entry.entry_id));
+              self.send_event(BuildEvent::BuildError(entry.entry_id));
               if self.markers.selection().is_none() {
                 selection = Some(entry.entry_id);
               }
@@ -342,7 +359,7 @@ impl<'a> BuildOutput<'a> {
       }
       *self.markers.tags_mut() = Markers::from(self.entries.as_slice()).tags().clone();
       if let Some(sel) = selection {
-        self.select_entry(sel);
+        self.select_block_from_entry(sel);
       }
       if let Ok(g) = locations.lock() {
         for (entry_id, location) in g.iter() {
@@ -369,12 +386,27 @@ impl<'a> BuildOutput<'a> {
     false
   }
 
-  pub fn select_entry(&mut self, entry_id: usize) {
+  pub fn select_block_from_entry(&mut self, entry_id: usize) {
     let marker_id = match self.block_at(entry_id) {
       Some(block) => block.marker_id(),
       None => 0,
     };
     self.markers.select(marker_id, None);
+  }
+
+  pub fn select_entry(&mut self, entry_id: usize, region: Option<Range<usize>>) {
+    let marker_id = match self.block_at(entry_id) {
+      Some(block) => block.marker_id(),
+      None => 0,
+    };
+    self
+      .markers
+      .set_selection(Some(MarkerSelection::new(marker_id, entry_id, region)));
+    crate::dbg!(
+      "Selecting marker #{} -> {:?}",
+      marker_id,
+      self.markers.selection()
+    );
   }
 
   /// Retrieve the displayable lines
@@ -424,7 +456,7 @@ impl<'a> BuildOutput<'a> {
       .find_map(|(entry_id, entry)| {
         if let Some(pos) = entry.message().find(query.as_ref()) {
           let block = self.block_at(entry_id).unwrap();
-          let marker_id = block.range().start;
+          let marker_id = block.marker_id();
           return Some((
             block,
             MarkerSelection::new(marker_id, entry_id, Some(pos..pos + query.as_ref().len())),
@@ -452,7 +484,10 @@ impl<'a, T: Into<BuildEntry>, I: IntoIterator<Item = T>> From<I> for BuildOutput
 mod tests {
   use std::{ops::Range, sync::mpsc::channel};
 
-  use crate::{BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef, Origin};
+  use crate::{
+    BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkedBlock, MarkerRef, MarkerSelection,
+    Origin,
+  };
 
   use super::BuildOutput;
 
@@ -468,8 +503,7 @@ mod tests {
     |
     = note: `#[warn(dead_code)]` on by default"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    let (tx_events, rx_events) = channel();
-    build.prepare(tx_events);
+    build.prepare();
     let unprepared = build.entries();
     let lines = build.display();
     assert_eq!(unprepared.len(), lines.len());
@@ -494,8 +528,7 @@ mod tests {
     blasdf asdfl alsdf
     asdfasdf"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    let (tx, rx) = channel();
-    build.prepare(tx);
+    build.prepare();
     assert_eq!(build.block_range_at(1), Some(Range { start: 0, end: 4 }));
     assert_eq!(build.block_range_at(5), Some(Range { start: 4, end: 7 }));
   }
@@ -510,8 +543,7 @@ mod tests {
     blasdf asdfl alsdf
     asdfasdf"#;
     let mut build = BuildOutput::from(sample_output.split('\n')).with_noise_removed(false);
-    let (tx, rx) = channel();
-    build.prepare(tx);
+    build.prepare();
     assert_eq!(
       build.block_at(1),
       Some(MarkedBlock::new(
@@ -531,6 +563,34 @@ mod tests {
         MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(4, "error:"))),
         4..7,
         build.entries[4..7].iter().collect::<Vec<_>>(),
+      ))
+    );
+  }
+
+  #[test]
+  fn search() {
+    let content = include_str!("../../../samples/rust/rust-panic.log")
+      .split("\n")
+      .collect::<Vec<_>>();
+    let mut build = BuildOutput::default();
+    build.extend(content);
+    build.prepare();
+    assert_eq!(
+      build.search("panic"),
+      Some((
+        MarkedBlock::new(
+          0,
+          MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(0, "error:"))),
+          1..7,
+          build
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(id, _entry)| *id >= 1 && *id < 7)
+            .map(|(_id, entry)| entry)
+            .collect::<Vec<_>>()
+        ),
+        MarkerSelection::new(0, 6, Some(16..21))
       ))
     );
   }

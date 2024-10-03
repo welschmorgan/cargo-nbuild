@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 use ratatui::style::{Style, Stylize};
 use regex::Regex;
 
-use crate::{BuildEntry, BuildTag, BuildTagKind};
+use crate::{BuildEntry, BuildTag, BuildTagKind, MarkedBlock};
 
 lazy_static! {
   /// Known build markers: errors, warnings and notes
@@ -167,20 +167,14 @@ impl Markers {
     &mut self.selection
   }
 
+  pub fn set_selection(&mut self, s: Option<MarkerSelection>) {
+    self.selection = s;
+  }
+
   /// Retrieve the currently selected entry.
   pub fn selected_entry(&self) -> Option<usize> {
     if let Some(selected) = &self.selection {
-      return self
-        .tags
-        .iter()
-        .enumerate()
-        .find_map(|(marker_id, (entry_id, _tag))| {
-          if marker_id == selected.marker_id {
-            return Some(entry_id);
-          }
-          None
-        })
-        .cloned();
+      return Some(selected.entry_id);
     }
     None
   }
@@ -238,6 +232,33 @@ impl Markers {
       self.selection = Some(MarkerSelection::new(id, self.tags[id].0, text));
       crate::dbg!("Selecting marker #{} -> {:?}", id, self.selection);
     }
+  }
+
+  pub fn block_range_at(&self, entry_id: usize) -> Option<(usize, Range<usize>)> {
+    for chunk in self.tags.iter().enumerate().collect::<Vec<_>>().chunks(2) {
+      let (cur_marker_id, (cur_entry_id, cur_tag)) = chunk[0];
+      if let Some((next_marker_id, (next_entry_id, next_tag))) = chunk.get(1) {
+        if entry_id >= *cur_entry_id && entry_id < *next_entry_id {
+          return Some((cur_marker_id, *cur_entry_id..*next_entry_id));
+        }
+      } else {
+        return Some((cur_marker_id, *cur_entry_id..*cur_entry_id + 1));
+      }
+    }
+    None
+  }
+
+  pub fn block_at(&self, entry_id: usize) -> Option<MarkedBlock> {
+    if let Some((marker_id, range)) = self.block_range_at(entry_id) {
+      let (_entry_id, tag) = &self.tags[marker_id];
+      return Some(MarkedBlock::new(
+        marker_id,
+        MarkerRef::known(*tag, None),
+        range,
+        vec![],
+      ));
+    }
+    None
   }
 
   /// Unselect marker

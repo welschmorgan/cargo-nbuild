@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{fmt::Display, ops::Range};
 
 use crate::MarkerRef;
 
@@ -12,6 +12,28 @@ pub struct MarkedBlock<'a> {
   entries: Vec<&'a BuildEntry>,
 }
 
+impl<'a> Display for MarkedBlock<'a> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      f,
+      "Block #{}:{}",
+      self.marker_id,
+      match self.entries.is_empty() {
+        true => String::new(),
+        false => format!(
+          " {:?}:{}",
+          self.range(),
+          self
+            .entries
+            .iter()
+            .map(|entry| format!("\n  | {}", entry.message()))
+            .collect::<Vec<_>>()
+            .join("")
+        ),
+      }
+    )
+  }
+}
 impl<'a> MarkedBlock<'a> {
   pub fn new(
     marker_id: usize,
