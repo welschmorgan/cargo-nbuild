@@ -1,10 +1,13 @@
 use std::{
   collections::HashMap,
   io::{stdin, IsTerminal as _},
+  path::PathBuf,
   process::exit,
 };
 
 use lazy_static::lazy_static;
+
+use crate::active_rule_name;
 
 struct KnownOption {
   name: String,
@@ -68,16 +71,55 @@ lazy_static! {
       .with_short('E')
       .with_activate(|opts, arg| opts.show_only_errors = true)
       .with_desc("Filter logs: show only errors"),
+    KnownOption::new("config")
+      .with_long("--config")
+      .with_short('c')
+      .with_value_required(true)
+      .with_activate(|opts, arg| opts.config_path = Some(PathBuf::from(arg.unwrap())))
+      .with_desc("Use custom config path"),
+    KnownOption::new("eject-config")
+      .with_long("--eject-config")
+      .with_activate(|opts, arg| opts.eject_config = true)
+      .with_desc("Eject (write) the config in the current directory"),
+    KnownOption::new("active-rule")
+      .with_short('r')
+      .with_long("--rule")
+      .with_activate(|opts, arg| opts.active_rule = arg.unwrap())
+      .with_value_required(true)
+      .with_desc("Define the active rule"),
+    KnownOption::new("dump-rules")
+      .with_long("--dump-rules")
+      .with_activate(|opts, arg| opts.dump_rules = true)
+      .with_desc("Dump known rules"),
   ];
 }
 
 /// Represent the application options
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct AppOptions {
   pub stdin: bool,
   pub show_help: bool,
   pub show_only_errors: bool,
+  pub config_path: Option<PathBuf>,
+  pub active_rule: String,
+  pub dump_rules: bool,
+  pub eject_config: bool,
   pub build_args: Vec<String>,
+}
+
+impl Default for AppOptions {
+  fn default() -> Self {
+    Self {
+      stdin: Default::default(),
+      show_help: Default::default(),
+      show_only_errors: Default::default(),
+      config_path: Default::default(),
+      active_rule: active_rule_name(),
+      dump_rules: false,
+      eject_config: Default::default(),
+      build_args: Default::default(),
+    }
+  }
 }
 
 impl AppOptions {

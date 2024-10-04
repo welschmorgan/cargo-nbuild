@@ -1,11 +1,13 @@
 use std::{fmt::Display, ops::Range, path::Path};
 
-use crate::CapturedMarker;
+use serde::{Deserialize, Serialize};
 
-use super::Location;
+use crate::{err, CapturedMarker, DeclaredMarker, ErrorKind, MarkerRef};
+
+use super::{active_rule, active_rule_name, Location};
 
 /// Represent the kind of a BuildTag, put on each [`BuildEntry`]
-#[derive(Debug, Clone, PartialEq, PartialOrd, Copy)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Copy, Serialize, Deserialize)]
 pub enum BuildTagKind {
   /// A cargo warning
   Warning,
@@ -29,35 +31,52 @@ impl Display for BuildTagKind {
 #[derive(Debug, Clone)]
 pub struct BuildTag {
   kind: BuildTagKind,
-  marker: Option<CapturedMarker>,
+  marker: Option<MarkerRef>,
   location: Option<Location>,
 }
 
 impl BuildTag {
   /// Construct a marker tag
-  pub fn marker<C: AsRef<str>>(k: BuildTagKind, range: Range<usize>, capture: C) -> Self {
-    Self {
-      kind: k,
-      marker: Some(CapturedMarker {
-        range,
-        text: capture.as_ref().to_string(),
-      }),
+  pub fn marker<C: AsRef<str>>(
+    tag: BuildTagKind,
+    range: Range<usize>,
+    capture: C,
+  ) -> crate::Result<Self> {
+    let declared = active_rule()
+      .markers
+      .iter()
+      .find(|marker| marker.tag == tag)
+      .cloned();
+    let declared = declared.ok_or_else(|| {
+      err!(
+        ErrorKind::Rule,
+        "rule '{}' has no tag kind {:?}",
+        active_rule_name(),
+        tag
+      )
+    })?;
+    Ok(Self {
+      kind: declared.tag,
+      marker: Some(MarkerRef::new(
+        Some(CapturedMarker {
+          range,
+          text: capture.as_ref().to_string(),
+        }),
+        declared,
+      )),
       location: None,
-    }
+    })
   }
 
-  /// Construct a warning marker tag
-  pub fn warning<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
-    Self::marker(BuildTagKind::Warning, range, capture)
-  }
-
-  /// Construct a error marker tag
-  pub fn error<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
+  pub fn error<C: AsRef<str>>(range: Range<usize>, capture: C) -> crate::Result<BuildTag> {
     Self::marker(BuildTagKind::Error, range, capture)
   }
 
-  /// Construct a error marker tag
-  pub fn note<C: AsRef<str>>(range: Range<usize>, capture: C) -> Self {
+  pub fn warning<C: AsRef<str>>(range: Range<usize>, capture: C) -> crate::Result<BuildTag> {
+    Self::marker(BuildTagKind::Warning, range, capture)
+  }
+
+  pub fn note<C: AsRef<str>>(range: Range<usize>, capture: C) -> crate::Result<BuildTag> {
     Self::marker(BuildTagKind::Note, range, capture)
   }
 
@@ -83,8 +102,12 @@ impl BuildTag {
     self.kind
   }
 
-  pub fn get_marker(&self) -> Option<&CapturedMarker> {
+  pub fn get_marker(&self) -> Option<&MarkerRef> {
     self.marker.as_ref()
+  }
+
+  pub fn get_capture(&self) -> Option<&CapturedMarker> {
+    self.marker.as_ref().and_then(|m| m.captured())
   }
 
   pub fn get_location(&self) -> Option<&Location> {

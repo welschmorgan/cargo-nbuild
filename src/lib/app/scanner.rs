@@ -38,7 +38,7 @@ impl Scanner {
     let f = move || {
       for line in buf.lines() {
         let line = line.expect("invalid input line").replace("\x00", "");
-        crate::dbg!("[stdin] {}", line);
+        // crate::dbg!("[stdin] {}", line);
         let _ = entries.send(vec![BuildEntry::new(line, self.origin)]);
       }
     };

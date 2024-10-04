@@ -14,9 +14,12 @@ use ratatui::{
   text::{Line, Span},
 };
 
-use crate::{err, BuildTagKind, Debug, ErrorKind, LogEntry, MarkerSelection, Markers, TryLockFor};
+use crate::{
+  err, BuildTagKind, Debug, DeclaredMarker, ErrorKind, LogEntry, MarkerSelection, Markers,
+  TryLockFor, DEFAULT_RULES,
+};
 
-use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
+use super::{active_rule, BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock, Rule};
 
 /// The BuildOutput struct prepares the [`BuildCommand`] raw output lines.
 /// It creates the necessary [`ratatui`] elements: [`Line`] and [`Span`]
@@ -41,6 +44,7 @@ use super::{BuildEntry, BuildEvent, BuildTag, Location, MarkedBlock};
 /// let _lines = build.display();
 /// ```
 pub struct BuildOutput<'a> {
+  rule: Rule,
   /// The raw unprocessed entries
   entries: Vec<BuildEntry>,
   warnings: Vec<usize>,
@@ -56,6 +60,7 @@ pub struct BuildOutput<'a> {
 impl<'a> Default for BuildOutput<'a> {
   fn default() -> Self {
     Self {
+      rule: active_rule(),
       entries: Default::default(),
       warnings: Default::default(),
       notes: Default::default(),
@@ -224,11 +229,11 @@ impl<'a> BuildOutput<'a> {
         })
         .as_ref()
         .expect("block found with no coresponding marker");
-      let marker = self.entries[range.start].marker().unwrap();
+      let marker = self.entries[range.start].first_marker().unwrap();
       let entries = self.entries[range.start..range.end]
         .iter()
         .collect::<Vec<_>>();
-      return Some(MarkedBlock::new(marker_id, marker, range, entries));
+      return Some(MarkedBlock::new(marker_id, marker.clone(), range, entries));
     }
     None
   }
@@ -244,6 +249,15 @@ impl<'a> BuildOutput<'a> {
     if let Some(events) = &self.build_events {
       let _ = events.send(event);
     }
+  }
+
+  pub fn find_marker(&self, tag: BuildTagKind) -> Option<&DeclaredMarker> {
+    for marker in &self.rule.markers {
+      if tag == marker.tag {
+        return Some(marker);
+      }
+    }
+    None
   }
 
   /// Prepare the entries that have not been processed yet
@@ -271,6 +285,7 @@ impl<'a> BuildOutput<'a> {
         recv.push(rx);
         let style_log = Style::default().dim();
         let th_locations = locations.clone();
+        let rule = self.rule.clone();
         threads.push(spawn(move || {
           Debug::log(format!(
             "preparing batch #{} -> {} entries",
@@ -279,12 +294,14 @@ impl<'a> BuildOutput<'a> {
           ));
           let mut ret: Vec<PreparedEntry<'_>> = vec![];
           for (_, entry) in &mut batch {
-            Markers::prepare(entry);
+            if let Err(e) = Markers::prepare(entry, &rule) {
+              crate::dbg!("Failed to prepare markers: {}", e);
+            }
           }
           let margin_width = batch
             .iter()
             .map(|(_id, entry)| {
-              if let Some(marker) = entry.marker() {
+              if let Some(marker) = entry.first_marker() {
                 return marker.captured().unwrap().text.len();
               }
               return 0;
@@ -294,7 +311,8 @@ impl<'a> BuildOutput<'a> {
             let mut line = Line::default(); //format!("{} | {}", entry_id, entry.message().to_string());
             let mut margin = Span::default();
             let mut message = entry.message().clone();
-            if let Some(marker) = entry.marker() {
+
+            if let Some(marker) = entry.first_marker() {
               // crate::dbg!("entry #{} is a marker: {}", global_entry_id, marker.kind());
               let captured = marker.captured().unwrap();
               margin = margin.content(captured.text.clone());
@@ -357,7 +375,9 @@ impl<'a> BuildOutput<'a> {
           }
         }
       }
-      *self.markers.tags_mut() = Markers::from(self.entries.as_slice()).tags().clone();
+      *self.markers.tags_mut() = Markers::from_entries(self.entries.as_slice())
+        .tags()
+        .clone();
       if let Some(sel) = selection {
         self.select_block_from_entry(sel);
       }
@@ -517,7 +537,7 @@ mod tests {
       unprepared[0],
       BuildEntry::new("warning: field `batch_id` is never read", Origin::default())
         .with_tags(vec![
-          BuildTag::warning(0..8, "warning:"),
+          BuildTag::warning(0..8, "warning:").expect("invalid warning marker"),
           BuildTag::location("src/lib\\build.rs", Some(450), Some(7))
         ])
         .with_created_at(unprepared[0].created_at().clone())
@@ -556,7 +576,7 @@ mod tests {
         0,
         MarkerRef::known(
           BuildTagKind::Warning,
-          Some(&CapturedMarker::new(0, "warning:"))
+          Some(CapturedMarker::new(0, "warning:"))
         ),
         0..4,
         build.entries[0..4].iter().collect::<Vec<_>>(),
@@ -566,7 +586,7 @@ mod tests {
       build.block_at(5),
       Some(MarkedBlock::new(
         1,
-        MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(4, "error:"))),
+        MarkerRef::known(BuildTagKind::Error, Some(CapturedMarker::new(4, "error:"))),
         4..7,
         build.entries[4..7].iter().collect::<Vec<_>>(),
       ))
@@ -586,7 +606,7 @@ mod tests {
       Some((
         MarkedBlock::new(
           0,
-          MarkerRef::known(BuildTagKind::Error, Some(&CapturedMarker::new(0, "error:"))),
+          MarkerRef::known(BuildTagKind::Error, Some(CapturedMarker::new(0, "error:"))),
           1..7,
           build
             .entries

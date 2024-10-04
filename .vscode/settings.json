@@ -1,5 +1,6 @@
 {
   "logViewer.watch": [
     ".cargo-nbuild.log"
-  ]
+  ],
+  "rust-analyzer.cargo.features": "all"
 }

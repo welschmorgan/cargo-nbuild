@@ -1,8 +1,13 @@
-use crate::{BuildEntry, BuildEvent, Debug, Origin};
+use crate::{
+  default_system_location, init_rules, load_rules, save_rules, set_active_rule, BuildEntry,
+  BuildEvent, Debug, Origin, Rule, DEFAULT_RULES,
+};
 
 use std::{
   collections::VecDeque,
   io::stdout,
+  path::PathBuf,
+  process::exit,
   sync::mpsc::channel,
   thread::{spawn, JoinHandle},
 };
@@ -20,6 +25,7 @@ use super::{AppOptions, Builder, Renderer, Scanner};
 /// Represent the application data
 pub struct App {
   options: AppOptions,
+  rules: Vec<Rule>,
   threads: VecDeque<JoinHandle<()>>,
 }
 
@@ -29,6 +35,7 @@ impl App {
     Self {
       options,
       threads: VecDeque::new(),
+      rules: DEFAULT_RULES.clone(),
     }
   }
 
@@ -43,7 +50,44 @@ impl App {
   }
 
   /// Run the whole application
-  pub fn run(&mut self) -> Result<(), crate::Error> {
+  pub fn run(&mut self) -> crate::Result<()> {
+    if let Some(path) = self.options.config_path.as_ref() {
+      if self.options.eject_config {
+        self.rules = init_rules(Some(path.clone()))?;
+      } else {
+        self.rules = load_rules(Some(path.clone()))?;
+      }
+    } else {
+      self.rules = init_rules(None)?;
+      if self.options.eject_config {
+        let path = default_system_location()
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .and_then(|fname| fname.to_str())
+          .map(|fname| PathBuf::from(format!("./{}", fname)))
+          .unwrap();
+        save_rules(&self.rules, Some(path))?;
+      }
+    }
+
+    set_active_rule(&self.options.active_rule);
+
+    if self.options.dump_rules {
+      for r in &self.rules {
+        println!("- Rule: {:?}", r.aliases);
+        println!("  Command: {}", r.command);
+        println!(
+          "  Markers:\n{}",
+          r.markers
+            .iter()
+            .map(|marker| format!("    {:?}: {}", marker.tag, marker.regex.as_str(),))
+            .collect::<Vec<_>>()
+            .join("\n")
+        );
+      }
+      exit(0);
+    }
+
     let mut terminal = ratatui::init();
     let _ = terminal.clear();
     let _ = execute!(stdout(), EnableMouseCapture);

@@ -5,6 +5,7 @@ pub mod event;
 pub mod location;
 pub mod origin;
 pub mod output;
+pub mod rule;
 pub mod tag;
 
 pub use block::*;
@@ -14,4 +15,5 @@ pub use event::*;
 pub use location::*;
 pub use origin::*;
 pub use output::*;
+pub use rule::*;
 pub use tag::*;

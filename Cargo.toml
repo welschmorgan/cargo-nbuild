@@ -17,8 +17,20 @@ path = "src/main.rs"
 name = "cargo_nbuild"
 path = "src/lib/mod.rs"
 
+[features]
+default = ["json"]
+all-formats = ["json", "yaml", "toml"]
+json = ["dep:serde_json"]
+yaml = ["dep:serde_yml"]
+toml = ["dep:toml"]
+
 [dependencies]
 ratatui = { version = "0.28.1", features = ["serde"] }
 lazy_static = "1"
 regex = "1.10.6"
 chrono = "0.4.38"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = { version = "1.0.128", optional = true }
+serde_yml = { version = "0.0.12", optional = true }
+toml = { version = "0.8.19", optional = true }
+dirs = "5.0.1"

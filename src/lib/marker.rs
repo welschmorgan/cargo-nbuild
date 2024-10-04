@@ -6,35 +6,20 @@ use std::{
 use lazy_static::lazy_static;
 use ratatui::style::{Style, Stylize};
 use regex::Regex;
+use serde::{de::Visitor, ser::SerializeStruct as _, Deserialize, Serialize};
 
-use crate::{BuildEntry, BuildTag, BuildTagKind, MarkedBlock};
+use crate::{rules, BuildEntry, BuildTag, BuildTagKind, MarkedBlock, Rule, DEFAULT_RULES};
 
-lazy_static! {
-  /// Known build markers: errors, warnings and notes
-  pub static ref BUILD_MARKERS: Arc<Vec<DeclaredMarker>> = Arc::new(vec![
-    DeclaredMarker {
-      tag: BuildTagKind::Error,
-      regex: Regex::new(r"error(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().red().bold(),
-    },
-    DeclaredMarker {
-      tag: BuildTagKind::Note,
-      regex: Regex::new(r"note(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().blue().bold(),
-    },
-    DeclaredMarker {
-      tag: BuildTagKind::Warning,
-      regex: Regex::new(r"warning(\[\w+\])?:").expect("invalid regular expression"),
-      style: Style::default().yellow().bold(),
-    },
-  ]);
+pub fn known_marker(k: BuildTagKind) -> Option<DeclaredMarker> {
+  for r in rules().iter() {
+    if let Some(r) = r.markers.iter().find(|m| m.tag == k) {
+      return Some(r.clone());
+    }
+  }
+  None
 }
 
-pub fn known_marker<'a>(k: BuildTagKind) -> Option<&'a DeclaredMarker> {
-  BUILD_MARKERS.iter().find(|m| m.tag == k)
-}
-
-pub fn must_know_marker<'a>(k: BuildTagKind) -> &'a DeclaredMarker {
+pub fn must_know_marker(k: BuildTagKind) -> DeclaredMarker {
   known_marker(k).expect("unknown marker")
 }
 
@@ -62,17 +47,46 @@ impl CapturedMarker {
   }
 }
 
+use serde::{self};
+
 /// Represent a marker definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclaredMarker {
   /// The tag kind
   pub tag: BuildTagKind,
   /// The regex used to capture text
+  #[serde(with = "regex_serde")]
   pub regex: Regex,
   /// The final style applied to the marker
   pub style: Style,
 }
 
+mod regex_serde {
+  use regex::Regex;
+  use serde::{self, Deserialize, Deserializer, Serializer};
+
+  pub fn serialize<S>(date: &Regex, s: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    s.serialize_str(date.as_str())
+  }
+
+  pub fn deserialize<'de, D>(deserializer: D) -> Result<Regex, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let s = String::deserialize(deserializer)
+      .map_err(|e| serde::de::Error::custom(format!("invalid string, {}", e)))?;
+    Ok(Regex::new(s.as_str()).map_err(serde::de::Error::custom)?)
+  }
+}
+
+impl DeclaredMarker {
+  pub fn new(tag: BuildTagKind, regex: Regex, style: Style) -> Self {
+    Self { tag, regex, style }
+  }
+}
 impl PartialEq for DeclaredMarker {
   fn eq(&self, other: &Self) -> bool {
     self.tag == other.tag
@@ -81,32 +95,28 @@ impl PartialEq for DeclaredMarker {
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MarkerRef<'a>(BuildTagKind, Option<&'a CapturedMarker>, &'a DeclaredMarker);
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerRef(Option<CapturedMarker>, DeclaredMarker);
 
-impl<'a> MarkerRef<'a> {
-  pub fn new(
-    kind: BuildTagKind,
-    capture: Option<&'a CapturedMarker>,
-    declared: &'a DeclaredMarker,
-  ) -> Self {
-    Self(kind, capture, declared)
+impl MarkerRef {
+  pub fn new(capture: Option<CapturedMarker>, declared: DeclaredMarker) -> Self {
+    Self(capture, declared)
   }
 
-  pub fn known(kind: BuildTagKind, capture: Option<&'a CapturedMarker>) -> Self {
-    Self::new(kind, capture, must_know_marker(kind))
+  pub fn known(kind: BuildTagKind, capture: Option<CapturedMarker>) -> Self {
+    Self::new(capture, must_know_marker(kind))
   }
 
   pub fn kind(&self) -> BuildTagKind {
-    self.0
+    self.1.tag
   }
 
-  pub fn captured(&self) -> Option<&'a CapturedMarker> {
-    self.1
+  pub fn captured(&self) -> Option<&CapturedMarker> {
+    self.0.as_ref()
   }
 
-  pub fn declared(&self) -> &'a DeclaredMarker {
-    self.2
+  pub fn declared(&self) -> &DeclaredMarker {
+    &self.1
   }
 }
 
@@ -200,16 +210,17 @@ impl Markers {
   /// Prepare markers of each [`BuildEntry`].
   ///
   /// Markers are messages that cargo emits like `^(warning|error|note):`
-  pub fn prepare(entry: &mut BuildEntry) {
-    for known_marker in BUILD_MARKERS.iter() {
+  pub fn prepare(entry: &mut BuildEntry, rule: &Rule) -> crate::Result<()> {
+    for known_marker in &rule.markers {
       if let Some(m) = known_marker.regex.find(&entry.message()) {
         entry.set_tag(BuildTag::marker(
           known_marker.tag,
           m.range(),
           m.as_str().to_string(),
-        ));
+        )?);
       }
     }
+    Ok(())
   }
 
   /// Retrieve a marker's `(entry_id, marker_kind)` value by it's id
@@ -353,6 +364,18 @@ impl Markers {
     self.select(self.tags.len(), None);
     self.selection.as_ref()
   }
+
+  pub fn from_entries(entries: &[BuildEntry]) -> Self {
+    Self {
+      tags: entries
+        .iter()
+        .enumerate()
+        // .inspect(|(id, entry)| crate::dbg!(format!("entry #{}: {:?}", id, entry.tags())))
+        .filter_map(|(id, entry)| entry.first_marker().map(|marker| (id, marker.kind())))
+        .collect::<Vec<_>>(),
+      selection: None,
+    }
+  }
 }
 
 impl AsRef<Vec<(usize, BuildTagKind)>> for Markers {
@@ -375,26 +398,6 @@ impl DerefMut for Markers {
   }
 }
 
-impl From<&[BuildEntry]> for Markers {
-  fn from(entries: &[BuildEntry]) -> Self {
-    Self {
-      tags: entries
-        .iter()
-        .enumerate()
-        // .inspect(|(id, entry)| crate::dbg!(format!("entry #{}: {:?}", id, entry.tags())))
-        .filter_map(|(id, entry)| entry.marker().map(|marker| (id, marker.kind())))
-        .collect::<Vec<_>>(),
-      selection: None,
-    }
-  }
-}
-
-impl From<&Vec<BuildEntry>> for Markers {
-  fn from(entries: &Vec<BuildEntry>) -> Self {
-    Self::from(entries.as_slice())
-  }
-}
-
 impl Default for Markers {
   fn default() -> Self {
     Self {
@@ -409,8 +412,8 @@ mod tests {
   use std::ops::Range;
 
   use crate::{
-    must_know_marker, BuildEntry, BuildTag, BuildTagKind, CapturedMarker, MarkerRef,
-    MarkerSelection, Origin,
+    active_rule, must_know_marker, rules, BuildEntry, BuildTag, BuildTagKind, CapturedMarker,
+    MarkerRef, MarkerSelection, Origin, DEFAULT_RULES,
   };
 
   use super::Markers;
@@ -418,13 +421,12 @@ mod tests {
   #[test]
   fn prepare_error() {
     let mut entry = BuildEntry::new("error: test", Origin::default());
-    Markers::prepare(&mut entry);
+    Markers::prepare(&mut entry, &active_rule());
     assert_eq!(
-      entry.marker(),
-      Some(MarkerRef::new(
-        BuildTagKind::Error,
-        Some(&CapturedMarker::new(0, "error:")),
-        must_know_marker(BuildTagKind::Error)
+      entry.first_marker(),
+      Some(&MarkerRef::new(
+        Some(CapturedMarker::new(0, "error:")),
+        must_know_marker(BuildTagKind::Error),
       ))
     )
   }
@@ -432,12 +434,11 @@ mod tests {
   #[test]
   fn prepare_warning() {
     let mut entry = BuildEntry::new("warning: test", Origin::default());
-    Markers::prepare(&mut entry);
+    Markers::prepare(&mut entry, &active_rule());
     assert_eq!(
-      entry.marker(),
-      Some(MarkerRef::new(
-        BuildTagKind::Warning,
-        Some(&CapturedMarker::new(0, "warning:")),
+      entry.first_marker(),
+      Some(&MarkerRef::new(
+        Some(CapturedMarker::new(0, "warning:")),
         must_know_marker(BuildTagKind::Warning)
       ))
     )
@@ -446,13 +447,11 @@ mod tests {
   #[test]
   fn prepare_note() {
     let mut entry = BuildEntry::new("note: test", Origin::default());
-    Markers::prepare(&mut entry);
-    let marker = entry.marker();
+    Markers::prepare(&mut entry, &active_rule());
     assert_eq!(
-      marker,
-      Some(MarkerRef::new(
-        BuildTagKind::Note,
-        Some(&CapturedMarker::new(0, "note:")),
+      entry.first_marker(),
+      Some(&MarkerRef::new(
+        Some(CapturedMarker::new(0, "note:")),
         must_know_marker(BuildTagKind::Note)
       ))
     )
@@ -461,11 +460,14 @@ mod tests {
   #[test]
   fn from_entries() {
     let entries = vec![
-      BuildEntry::new("error: test error", Origin::default())
-        .with_tags([BuildTag::error(Range { start: 0, end: 6 }, "error:")]),
+      BuildEntry::new("error: test error", Origin::default()).with_tags([BuildTag::error(
+        Range { start: 0, end: 6 },
+        "error:",
+      )
+      .unwrap()]),
       BuildEntry::new("and a non-marker", Origin::default()),
     ];
-    let markers = Markers::from(&entries);
+    let markers = Markers::from_entries(&entries);
     assert_eq!(
       markers,
       Markers {
@@ -478,13 +480,19 @@ mod tests {
   #[test]
   fn selected() {
     let entries = vec![
-      BuildEntry::new("error: test error", Origin::default())
-        .with_tags([BuildTag::error(Range { start: 0, end: 6 }, "error:")]),
+      BuildEntry::new("error: test error", Origin::default()).with_tags([BuildTag::error(
+        Range { start: 0, end: 6 },
+        "error:",
+      )
+      .unwrap()]),
       BuildEntry::new("and a non-marker", Origin::default()),
-      BuildEntry::new("warning: test warning", Origin::default())
-        .with_tags([BuildTag::warning(Range { start: 0, end: 7 }, "warning:")]),
+      BuildEntry::new("warning: test warning", Origin::default()).with_tags([BuildTag::warning(
+        Range { start: 0, end: 7 },
+        "warning:",
+      )
+      .unwrap()]),
     ];
-    let mut markers = Markers::from(&entries);
+    let mut markers = Markers::from_entries(&entries);
     markers.select(1, None);
     assert_eq!(markers.selection, Some(MarkerSelection::new(1, 2, None)));
     assert_eq!(markers.selected_entry(), Some(2));
@@ -494,13 +502,19 @@ mod tests {
   #[test]
   fn entry_for_marker() {
     let entries = vec![
-      BuildEntry::new("error: test error", Origin::default())
-        .with_tags([BuildTag::error(Range { start: 0, end: 6 }, "error:")]),
+      BuildEntry::new("error: test error", Origin::default()).with_tags([BuildTag::error(
+        Range { start: 0, end: 6 },
+        "error:",
+      )
+      .unwrap()]),
       BuildEntry::new("and a non-marker", Origin::default()),
-      BuildEntry::new("warning: test warning", Origin::default())
-        .with_tags([BuildTag::warning(Range { start: 0, end: 7 }, "warning:")]),
+      BuildEntry::new("warning: test warning", Origin::default()).with_tags([BuildTag::warning(
+        Range { start: 0, end: 7 },
+        "warning:",
+      )
+      .unwrap()]),
     ];
-    let markers = Markers::from(&entries);
+    let markers = Markers::from_entries(&entries);
     let entry = markers.entry_for_marker(1);
     assert_eq!(entry, Some(&(2, BuildTagKind::Warning)))
   }
@@ -508,13 +522,19 @@ mod tests {
   #[test]
   fn select_next() {
     let entries = vec![
-      BuildEntry::new("error: test error", Origin::default())
-        .with_tags([BuildTag::error(Range { start: 0, end: 6 }, "error:")]),
+      BuildEntry::new("error: test error", Origin::default()).with_tags([BuildTag::error(
+        Range { start: 0, end: 6 },
+        "error:",
+      )
+      .unwrap()]),
       BuildEntry::new("and a non-marker", Origin::default()),
-      BuildEntry::new("warning: test warning", Origin::default())
-        .with_tags([BuildTag::warning(Range { start: 0, end: 7 }, "warning:")]),
+      BuildEntry::new("warning: test warning", Origin::default()).with_tags([BuildTag::warning(
+        Range { start: 0, end: 7 },
+        "warning:",
+      )
+      .unwrap()]),
     ];
-    let mut markers = Markers::from(&entries);
+    let mut markers = Markers::from_entries(&entries);
     // first time goes from None -> Some(0)
     assert_eq!(
       markers.select_next(),
@@ -535,13 +555,19 @@ mod tests {
   #[test]
   fn select_previous() {
     let entries = vec![
-      BuildEntry::new("error: test error", Origin::default())
-        .with_tags([BuildTag::error(Range { start: 0, end: 6 }, "error:")]),
+      BuildEntry::new("error: test error", Origin::default()).with_tags([BuildTag::error(
+        Range { start: 0, end: 6 },
+        "error:",
+      )
+      .unwrap()]),
       BuildEntry::new("and a non-marker", Origin::default()),
-      BuildEntry::new("warning: test warning", Origin::default())
-        .with_tags([BuildTag::warning(Range { start: 0, end: 7 }, "warning:")]),
+      BuildEntry::new("warning: test warning", Origin::default()).with_tags([BuildTag::warning(
+        Range { start: 0, end: 7 },
+        "warning:",
+      )
+      .unwrap()]),
     ];
-    let mut markers = Markers::from(&entries);
+    let mut markers = Markers::from_entries(&entries);
     // first time goes from None -> Some(0)
     assert_eq!(
       markers.select_previous(),

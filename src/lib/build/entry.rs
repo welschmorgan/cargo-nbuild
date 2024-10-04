@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-use crate::{MarkerRef, BUILD_MARKERS};
+use crate::MarkerRef;
 
-use super::{BuildTag, BuildTagKind, Origin};
+use super::{rules, BuildTag, BuildTagKind, Origin, Rule, DEFAULT_RULES};
 
 /// Represent an output line written by the cargo build process [`BuildCommand`]
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
@@ -84,17 +84,11 @@ impl BuildEntry {
   }
 
   /// Retrieve any [`Marker`] associated to this tag
-  pub fn marker(&self) -> Option<MarkerRef> {
-    for known_marker in BUILD_MARKERS.iter() {
-      if let Some(tag) = self.tag(known_marker.tag) {
-        return Some(MarkerRef::new(
-          tag.get_kind(),
-          tag.get_marker(),
-          known_marker,
-        ));
-      }
+  pub fn first_marker<'a>(&'a self) -> Option<&MarkerRef> {
+    if let Some(tag) = self.tags.iter().find(|tag| tag.get_marker().is_some()) {
+      return tag.get_marker();
     }
-    return None;
+    None
   }
 
   /// Retrieve all tags

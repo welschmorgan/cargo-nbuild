@@ -15,6 +15,10 @@ pub enum ErrorKind {
   Parsing,
   /// Encoding/decoding failed
   Codec,
+  /// File not found
+  FileNotFound,
+  /// Rule
+  Rule,
 }
 
 impl Display for ErrorKind {
@@ -28,6 +32,8 @@ impl Display for ErrorKind {
         Self::LockTimeout => "lock timeout",
         Self::Parsing => "parsing failed",
         Self::Codec => "codec",
+        Self::FileNotFound => "file not found",
+        Self::Rule => "rule",
       }
     )
   }

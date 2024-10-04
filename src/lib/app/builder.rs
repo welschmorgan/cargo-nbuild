@@ -4,7 +4,7 @@ use std::{
   thread::spawn,
 };
 
-use crate::{BuildCommand, BuildEntry, BuildEvent, Debug, Origin};
+use crate::{active_rule, BuildCommand, BuildEntry, BuildEvent, Debug, Origin};
 
 use super::AppOptions;
 
@@ -30,7 +30,7 @@ impl Builder {
   /// and push output lines to [`BuildOutput`]
   pub fn run(self) {
     let args = self.options.build_args;
-    Debug::log("build thread started");
+    crate::dbg!("build thread started: {:#?}", active_rule());
     match BuildCommand::spawn(args) {
       Ok(mut build) => {
         let _ = self.tx_events.send(BuildEvent::BuildStarted);
@@ -43,14 +43,14 @@ impl Builder {
         let stdout_thread = spawn(move || {
           for line in out_buf.lines() {
             let line = line.expect("invalid output line");
-            Debug::log(format!("[stdout] {}", line));
+            // Debug::log(format!("[stdout] {}", line));
             let _ = stdout_events.send(vec![BuildEntry::new(line, Origin::Stdout)]);
           }
         });
         let stderr_thread = spawn(move || {
           for line in err_buf.lines() {
             let line = line.expect("invalid error line");
-            Debug::log(format!("[stderr] {}", line));
+            // Debug::log(format!("[stderr] {}", line));
             let t = vec![BuildEntry::new(line, Origin::Stderr)];
             let _ = stderr_events.send(t);
           }

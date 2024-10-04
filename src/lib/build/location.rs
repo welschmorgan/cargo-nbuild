@@ -92,12 +92,12 @@ impl Display for Location {
       "{}{}{}",
       self.path.display(),
       match self.line {
-        Some(l) => format!(": {}", l),
+        Some(l) => format!(":{}", l),
         None => String::new(),
       },
       match self.line {
         Some(_) => match self.column {
-          Some(c) => format!(": {}", c),
+          Some(c) => format!(":{}", c),
           None => String::new(),
         },
         None => String::new(),

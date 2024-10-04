@@ -7,7 +7,7 @@ use super::BuildEntry;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkedBlock<'a> {
   marker_id: usize,
-  marker: MarkerRef<'a>,
+  marker: MarkerRef,
   entry_range: Range<usize>,
   entries: Vec<&'a BuildEntry>,
 }
@@ -37,7 +37,7 @@ impl<'a> Display for MarkedBlock<'a> {
 impl<'a> MarkedBlock<'a> {
   pub fn new(
     marker_id: usize,
-    marker: MarkerRef<'a>,
+    marker: MarkerRef,
     entry_range: Range<usize>,
     entries: Vec<&'a BuildEntry>,
   ) -> Self {
@@ -61,10 +61,10 @@ impl<'a> MarkedBlock<'a> {
     self.lines().join("\n")
   }
 
-  pub fn marker(&self) -> &MarkerRef<'a> {
+  pub fn marker(&self) -> &MarkerRef {
     &self.marker
   }
-  pub fn marker_mut(&mut self) -> &mut MarkerRef<'a> {
+  pub fn marker_mut(&mut self) -> &mut MarkerRef {
     &mut self.marker
   }
 

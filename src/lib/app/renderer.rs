@@ -13,8 +13,8 @@ use ratatui::{
   },
   layout::{Constraint, Layout, Rect},
   style::{Style, Stylize},
-  text::Line,
-  widgets::{Block, Paragraph, ScrollbarState},
+  text::{Line, Span},
+  widgets::{Block, Clear, Paragraph, ScrollbarState, Widget},
   DefaultTerminal,
 };
 
@@ -149,6 +149,7 @@ impl Renderer {
       false => None,
     };
     let mut stop = false;
+    crate::dbg!("Started rendering");
     while !stop {
       build.pull(&build_output);
       if build.prepare() {
@@ -233,9 +234,13 @@ impl Renderer {
             .flat_map(|arg| vec![" ".into(), arg.into()].into_iter())
             .collect::<Vec<_>>(),
         );
+        frame.render_widget(Clear, command_area);
         let command = Paragraph::new(Line::default().spans(args)).block(Block::bordered());
+        frame.render_widget(command, command_area);
+
         let shortcuts =
           Paragraph::new(Line::default().spans(["H: Show help"])).block(Block::bordered());
+        frame.render_widget(shortcuts, shortcuts_area);
 
         if status_entry.is_some() || build_status_entry.is_some() {
           let mut new_status = *status_bar.borrow();
@@ -269,8 +274,6 @@ impl Renderer {
         log_view.set_filter(filter);
         frame.render_stateful_widget(log_view, log_area, &mut vertical_scroll_state);
         // frame.render_stateful_widget(log_view, log_area, &mut list_state);
-        frame.render_widget(shortcuts, shortcuts_area);
-        frame.render_widget(command, command_area);
         if search_state.is_some() {
           frame.render_stateful_widget(SearchBar, search_area, &mut search_state);
           let mut cursor_pos = (search_area.x, search_area.y);
